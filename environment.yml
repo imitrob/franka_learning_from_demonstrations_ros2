@@ -1,0 +1,31 @@
+name: lfd
+channels:
+- conda-forge
+- robostack-staging
+dependencies:
+- python #=3.11
+- numpy=1.26.4 # 1.24.3
+- quaternion
+- scikit-learn
+- seaborn
+- ros-humble-desktop
+- ros-humble-realsense2-camera
+- ros-humble-realsense2-camera-msgs
+- ros-humble-realsense2-description
+- ros-humble-librealsense2
+- ros-humble-rqt-reconfigure
+- ros-humble-tf-transformations
+- transforms3d
+- spatialmath-python
+- compilers # ROS2 utils
+- cmake
+- pkg-config
+- make
+- colcon-common-extensions
+- rosdep
+- opencv
+- pynput
+- scipy
+- roboticstoolbox-python
+- pip:
+  - panda-python
