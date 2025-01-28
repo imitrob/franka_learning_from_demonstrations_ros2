@@ -6,7 +6,7 @@ from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
-    height_arg = DeclareLaunchArgument('height', default_value='0.25', description='Height parameter')
+    height_arg = DeclareLaunchArgument('height', default_value='0.4', description='Height parameter')
     front_offset_arg = DeclareLaunchArgument('front_offset', default_value='0.4', description='Front offset parameter')
     side_offset_arg = DeclareLaunchArgument('side_offset', default_value='0.0', description='Side offset parameter')
 
