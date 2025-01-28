@@ -22,7 +22,7 @@ class Feedback():
         self.listener.start()
 
     def _on_press(self, key):
-        self.get_logger().info(f"Event happened, user pressed {key}")
+        # self.get_logger().info(f"Event happened, user pressed {key}")
         # This function runs on the background and checks if a keyboard key was pressed
         if key == KeyCode.from_char('e'):
             self.end = True

@@ -21,6 +21,7 @@ ROS2 installs the packages to build folder. Make a symbolic links to use materia
 ln -s ~/lfd_ros2_ws/src/franka_learning_from_demonstrations/object_localization/cfg ~/lfd_ros2_ws/build/object_localization/cfg
 ln -s ~/lfd_ros2_ws/src/franka_learning_from_demonstrations/object_localization/config ~/lfd_ros2_ws/build/object_localization/config
 ln -s ~/lfd_ros2_ws/src/franka_learning_from_demonstrations/trajectory_data/trajectories ~/lfd_ros2_ws/build/trajectory_data/trajectories
+ln -s ~/lfd_ros2_ws/src/gesture_actions/links ~/lfd_ros2_ws/build/gesture_actions/links
 ```
 Please remember to source the workspace in every terminal you open.
 

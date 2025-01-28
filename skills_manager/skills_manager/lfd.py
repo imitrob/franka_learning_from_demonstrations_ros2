@@ -33,12 +33,6 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.recorded_traj = None
         self.recorded_ori_wxyz = None
 
-        # self.height = 720
-        # self.width = 1280
-        # self.width_ds = int(1280/4)
-        # self.row_bias_pct = (self.row_crop_pct_top + self.row_crop_pct_bot)/2 - 0.5
-        # self.col_bias_pct = (self.col_crop_pct_left + self.col_crop_pct_right)/2 - 0.5
-
         self.end = False
         self.grip_open_width = OPEN_GRIPPER_WIDTH
 
@@ -46,8 +40,6 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.retry_counter = 0
 
         self.set_localizer_client = self.create_client(SetTemplate, 'set_localizer', callback_group=self.callback_group)
-        # while not self.set_localizer_client.wait_for_service(timeout_sec=1.0):
-        #     print('service ("set_localizer") not available, waiting again...', flush=True)
         self.active_localizer_client = self.create_client(Trigger, 'active_localizer', qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
 
         time.sleep(1)
