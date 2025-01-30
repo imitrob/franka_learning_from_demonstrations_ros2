@@ -18,8 +18,11 @@ class Feedback():
         self.spiral_feedback_correction=0
         self.pause=False
 
-        self.listener = Listener(on_press=self._on_press)
+        self.listener = Listener(on_press=self._on_press, on_release=self._on_release)
         self.listener.start()
+
+    def _on_release(self, key):
+        pass
 
     def _on_press(self, key):
         # self.get_logger().info(f"Event happened, user pressed {key}")
