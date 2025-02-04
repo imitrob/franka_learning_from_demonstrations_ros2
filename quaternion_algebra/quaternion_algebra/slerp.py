@@ -1,5 +1,6 @@
 import numpy as np
-from algebra import inner, change_sign, quaternion_power, quaternion_product, quaternion_divide
+import quaternion
+from quaternion_algebra.algebra import inner, change_sign, quaternion_power, quaternion_product, quaternion_divide, quaternion_log, quaternion_absolute
 def slerp_with_power(q1, q2, tau):
     if inner(q1, q2) < 0:
         q1 = change_sign(q1)
@@ -60,7 +61,7 @@ def intrinsic(q1, q2):
         quaternionic.distance.rotation.chordal
 
         """
-    qtemp = np.empty(4)
+    qtemp = np.quaternion()
     a = (q1.w - q2.w)**2 + (q1.x - q2.x)**2 + (q1.y - q2.y)**2 + (q1.z - q2.z)**2
     b = (q1.w + q2.w)**2 + (q1.x + q2.x)**2 + (q1.y + q2.y)**2 + (q1.z + q2.z)**2
     if b > a:
@@ -71,3 +72,49 @@ def intrinsic(q1, q2):
     qout = quaternion_absolute(qtemp)
     qout *= 2
     return qout
+
+
+
+
+def normalize(q):
+    """Normalize a quaternion to unit length."""
+    return q / np.linalg.norm(q)
+
+def slerp2(q1, q2, p, epsilon=1e-8):
+    """
+    Perform Spherical Linear Interpolation (SLERP) between two quaternions.
+    
+    Args:
+        q1: First quaternion (4-element array-like).
+        q2: Second quaternion (4-element array-like).
+        p: Interpolation weight (0 <= p <= 1).
+        epsilon: Threshold to prevent division by small numbers.
+    
+    Returns:
+        Interpolated quaternion (numpy array).
+    """
+    q1 = normalize(np.array(q1, dtype=np.float64))
+    q2 = normalize(np.array(q2, dtype=np.float64))
+    
+    # Compute the dot product to determine the angle between quaternions
+    dot = np.dot(q1, q2)
+    
+    # Ensure shortest path (correct for negative dot product)
+    if dot < 0.0:
+        q2 = -q2
+        dot = -dot
+    
+    # If the quaternions are almost the same, use linear interpolation
+    if dot > 1.0 - epsilon:
+        result = q1 + p * (q2 - q1)
+        return normalize(result)
+    
+    # Compute the angle between the quaternions
+    theta_0 = np.arccos(dot)
+    theta = theta_0 * p
+    
+    # Compute the interpolated quaternion components
+    q3 = normalize(q2 - q1 * dot)  # Orthogonal component
+    
+    return q1 * np.cos(theta) + q3 * np.sin(theta)
+

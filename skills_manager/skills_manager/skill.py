@@ -8,6 +8,8 @@ import spatialmath as sm
 from spatialmath.base import q2r
 import matplotlib.pyplot as plt
 
+from quaternion_algebra.slerp import slerp2
+
 class Skill():
     def __init__(self, 
                  traj= np.empty([3,0]), 
@@ -104,7 +106,7 @@ class Skill():
         morphed_traj = Skill()
         
         for i,j in conn:
-            blended_quaternion = slerp(self.ori_wxyz[i], other.ori_wxyz[j], p)
+            blended_quaternion = slerp2(self.ori_wxyz[i], other.ori_wxyz[j], p)
 
             morphed_traj.traj_T = np.c_[morphed_traj.traj_T,      (1 - p) * self.traj[i]     + p * other.traj[j]  ]
             morphed_traj.ori_wxyz_T = np.c_[morphed_traj.ori_wxyz_T,  blended_quaternion   ]
@@ -124,7 +126,7 @@ class Skill():
             poses.append(sm.SE3.Rt(q2r(q), t))
         return poses
 
-    def plot(self, color="blue", rot_plot_interval=100):
+    def plot(self, color="blue", rot_plot_interval=100, frame_text=""):
         i = 0
         poses = self.poses_SE3()
         p = poses[0]
@@ -132,8 +134,9 @@ class Skill():
             plt.plot([p.t[0], se3.t[0]], [p.t[1], se3.t[1]], zs=[p.t[2], se3.t[2]], color=color)
             p = se3
             if i % rot_plot_interval == 0:
-                frame = f"{i}"
-                se3.plot(style='rviz', width=2, length=(0.1, 0.1, 0.1), frame=frame, color=color, textcolor=color)
+                sub_s = f"{{f={i}}}"
+                frame = f"{frame_text}_{sub_s}"
+                se3.plot(style='rviz', width=2, length=(0.02, 0.02, 0.02), frame=frame, color=color, textcolor=color, d2=0.01, flo=(0.0, 0.0, -0.01))
             i += 1
 
         plt.axis("equal")
@@ -147,8 +150,8 @@ class Skill():
 
 
 def main():
-    skill1 = Skill().from_file("open_drawer")
-    skill2 = Skill().from_file("pick_lid")
+    skill1 = Skill().from_file("open_drawer_alt")
+    skill2 = Skill().from_file("open_drawer")
     print(skill1.poses.shape)
     print(skill2.poses.shape)
     
@@ -166,64 +169,14 @@ def main():
     plt.rcParams["figure.figsize"] = (19,19)
     sm.base.plot_cuboid(sides=(1.4, 0.8, 0.9), centre=(0.4, 0, -0.45), color="blue")
     sm.base.plot_cone(radius=0.1, height=0.2, color="blue")
-    skill1.plot()
-    skill2.plot(color="red")
-    skill_morphed.plot(color="green")
+    skill1.plot(frame_text="min")
+    skill2.plot(color="red", frame_text="max")
+    skill_morphed.plot(color="green", frame_text="inp^{p=0.5}")
     plt.show()
 
     
     # skill1.animate()
 
-
-def normalize(q):
-    """Normalize a quaternion to unit length."""
-    return q / np.linalg.norm(q)
-
-def slerp(q1, q2, p, epsilon=1e-8):
-    """
-    Perform Spherical Linear Interpolation (SLERP) between two quaternions.
-    
-    Args:
-        q1: First quaternion (4-element array-like).
-        q2: Second quaternion (4-element array-like).
-        p: Interpolation weight (0 <= p <= 1).
-        epsilon: Threshold to prevent division by small numbers.
-    
-    Returns:
-        Interpolated quaternion (numpy array).
-    """
-    q1 = normalize(np.array(q1, dtype=np.float64))
-    q2 = normalize(np.array(q2, dtype=np.float64))
-    
-    # Compute the dot product to determine the angle between quaternions
-    dot = np.dot(q1, q2)
-    
-    # Ensure shortest path (correct for negative dot product)
-    if dot < 0.0:
-        q2 = -q2
-        dot = -dot
-    
-    # If the quaternions are almost the same, use linear interpolation
-    if dot > 1.0 - epsilon:
-        result = q1 + p * (q2 - q1)
-        return normalize(result)
-    
-    # Compute the angle between the quaternions
-    theta_0 = np.arccos(dot)
-    theta = theta_0 * p
-    
-    # Compute the interpolated quaternion components
-    q3 = normalize(q2 - q1 * dot)  # Orthogonal component
-    
-    return q1 * np.cos(theta) + q3 * np.sin(theta)
-
-# Example usage:
-q1 = np.array([1.0, 0.0, 0.0, 0.0])  # Identity quaternion
-q2 = np.array([0.0, 1.0, 0.0, 0.0])  # 180-degree rotation around X-axis
-p = 0.5  # Blend halfway
-
-blended_quaternion = slerp(q1, q2, p)
-print("Blended quaternion:", blended_quaternion)
 
 if __name__ == "__main__":
     main()

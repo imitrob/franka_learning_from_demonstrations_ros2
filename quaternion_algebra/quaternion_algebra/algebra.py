@@ -1,6 +1,6 @@
 import numpy as np
 import quaternion
-
+from copy import deepcopy
 
 def from_euler_angles(roll, pitch, yaw):
     cr = np.cos(roll * 0.5)
@@ -136,7 +136,7 @@ def quaternion_log(q):
     b = np.sqrt(q.x**2 + q.y**2 + q.z**2)
     v = np.arctan2(b, q.w)
     f = v / b
-    qout = np.copy(q)
+    qout = deepcopy(q)
     qout.w = np.log(q.w * q.w + b * b) / 2.0
     qout.x = f * q.x
     qout.y = f * q.y
