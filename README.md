@@ -68,7 +68,7 @@ ros2 launch object_localization box_localization_launch.py
 ```
 
 ```bash
-ros2 launch skills_manager play_skill_launch.py name_skill:='skill template_name:="new_template"'
+ros2 launch skills_manager play_skill_launch.py name_skill:='skill name_template:="new_template"'
 ```
 
 ### Commands during demonstration
