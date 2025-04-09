@@ -231,4 +231,5 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
         goal.header.stamp = self.get_clock().now().to_msg()
 
         print(f"Move to start: x={goal.pose.position.x} y={goal.pose.position.y} y={goal.pose.position.z}", flush=True)
-        self.go_to_pose(goal)
+        self.go_to_pose_ik(goal)
+        time.sleep(4.0) # could be deleted because go_to_pose_ik waits until finished

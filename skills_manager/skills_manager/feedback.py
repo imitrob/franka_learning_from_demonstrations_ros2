@@ -46,14 +46,20 @@ class Feedback():
             self.feedback[2] = -self.feedback_gain
         # Close/open gripper
         if key == KeyCode.from_char('c'):
-            self.grip_value = 0
-            self.grasp_gripper(self.grip_value)
-            self.gripper_feedback_correction = 1
+            try:
+                self.grip_value = 0
+                self.grasp_gripper(self.grip_value)
+                self.gripper_feedback_correction = 1
+            except AttributeError:
+                print("No robot available", flush=True)
 
         if key == KeyCode.from_char('o'):
-            self.grip_value = self.grip_open_width
-            self.move_gripper(self.grip_value)
-            self.gripper_feedback_correction = 1
+            try:
+                self.grip_value = self.grip_open_width
+                self.move_gripper(self.grip_value)
+                self.gripper_feedback_correction = 1
+            except AttributeError:
+                print("No robot available", flush=True)
         if key == KeyCode.from_char('f'):
             self.feedback[3] = 1
         if key == KeyCode.from_char('k'):
@@ -136,3 +142,258 @@ class Feedback():
         self.spiral_feedback_correction = 0 
 
     
+
+class FrankaOnPress():
+    def __init__(self):
+        super(FrankaOnPress, self).__init__()
+        assert HAS_ROS, "ROS couldn't be imported"
+        if not is_roscore_running(): return
+        
+        self.button_x_subscriber = rospy.Subscriber('/franka_buttons/x', Float32, self.cb_x, queue_size=10)
+        self.button_y_subscriber = rospy.Subscriber('/franka_buttons/y', Float32, self.cb_y, queue_size=10)
+        self.button_circle_subscriber = rospy.Subscriber('/franka_buttons/circle', Bool, self.cb_circle, queue_size=10)
+        self.button_cross_subscriber = rospy.Subscriber('/franka_buttons/cross', Bool, self.cb_cross, queue_size=10)
+        self.button_check_subscriber = rospy.Subscriber('/franka_buttons/check', Bool, self.cb_check, queue_size=10)
+
+        self.x_positive_press_act = False
+        self.x_negative_press_act = False
+        self.y_positive_press_act = False
+        self.y_negative_press_act = False
+        self.circle_press_act = False
+        self.cross_press_act = False
+        self.check_press_act = False
+
+        self.x_positive_release_act = False
+        self.x_negative_release_act = False
+        self.y_positive_release_act = False
+        self.y_negative_release_act = False
+        self.circle_release_act = False
+        self.cross_release_act = False
+        self.check_release_act = False
+
+    def cb_x(self, msg):
+        if int(msg.data) == 1:
+            self.decide_act('x_positive', True)
+        elif int(msg.data) == -1:
+            self.decide_act('x_negative', True)
+        elif int(msg.data) == 0:
+            self.decide_act('x_positive', False)
+            self.decide_act('x_negative', False)
+        else: raise Exception()
+
+    def cb_y(self, msg):
+        if int(msg.data) == 1:
+            self.decide_act('y_positive', True)
+        elif int(msg.data) == -1:
+            self.decide_act('y_negative', True)
+        elif int(msg.data) == 0:
+            self.decide_act('y_positive', False)
+            self.decide_act('y_negative', False)
+        else: raise Exception()
+
+    def cb_circle(self, msg):
+        self.decide_act('circle', bool(msg.data))
+
+    def cb_cross(self, msg):
+        self.decide_act('cross', bool(msg.data))
+
+    def cb_check(self, msg):    
+        self.decide_act('check', bool(msg.data))
+
+    def decide_act(self, btn: str, clicked: bool):
+        if clicked:
+            act_already = getattr(self, btn+'_press_act')
+            if not act_already:
+                setattr(self, btn+'_press_act', True)
+                self.franka_on_press(btn)        
+            setattr(self, btn+'_release_act', False)    
+        else:
+            act_already = getattr(self, btn+'_release_act')
+            if not act_already:
+                setattr(self, btn+'_release_act', True)
+                self.franka_on_release(btn)    
+            setattr(self, btn+'_press_act', False)
+
+    def franka_on_press(self, btn):
+        if btn == "check":
+            print("Event happened, user pressed Check")
+        elif btn == "cross":
+            print("Event happened, user pressed Cross")
+        elif btn == "circle":
+            print("Event happened, user pressed Circle")
+        elif btn == "x_positive":
+            print("Event happened, user pressed x=1")
+        elif btn == "x_negative":
+            print("Event happened, user pressed x=-1")
+        elif btn == "y_positive":
+            print("Event happened, user pressed y=1")
+        elif btn == "y_negative":
+            print("Event happened, user pressed y=-1")
+
+    def franka_on_release(self, btn):
+        if btn == "check":
+            print("Event happened, user released Check")
+        elif btn == "cross":
+            print("Event happened, user released Cross")
+        elif btn == "circle":
+            print("Event happened, user released Circle")
+        elif btn == "x_positive":
+            print("Event happened, user released x=1")
+        elif btn == "x_negative":
+            print("Event happened, user released x=-1")
+        elif btn == "y_positive":
+            print("Event happened, user released y=1")
+        elif btn == "y_negative":
+            print("Event happened, user released y=-1")
+
+
+
+class RiskAwareFrankaButtons(FrankaOnPress):
+    def __init__(self):
+        super(RiskAwareFrankaButtons, self).__init__()
+    def franka_on_press(self, key):
+        if key == "check":
+            self._on_press(KeyCode.from_char("t")) # safe
+        elif key == "cross":
+            self._on_press(KeyCode.from_char("r")) # danger
+        elif key == "circle":
+            self._on_press(KeyCode.from_char("q"))
+        elif key == "x_positive":
+            print("x=1 button have no mapping")
+        elif key == "x_negative":
+            print("x=-1 button have no mapping")
+        elif key == "y_positive":
+            print("y=1 button have no mapping")
+        elif key == "y_negative":
+            print("y=-1 button have no mapping")
+
+    def franka_on_release(self, key):
+        if key == "check":
+            self._on_release(KeyCode.from_char("t")) # safe
+        elif key == "cross":
+            self._on_release(KeyCode.from_char("r")) # danger
+        elif key == "circle":
+            self._on_release(KeyCode.from_char("q"))
+        elif key == "x_positive":
+            print("x=1 button have no mapping")
+        elif key == "x_negative":
+            print("x=-1 button have no mapping")
+        elif key == "y_positive":
+            print("y=1 button have no mapping")
+        elif key == "y_negative":
+            print("y=-1 button have no mapping")
+
+
+
+class RiskAwareFeedback(Feedback, RiskAwareFrankaButtons):
+    def __init__(self, button_press_mode: str = "momentary"):
+        super(RiskAwareFeedback, self).__init__()
+        self.risk_flag = 0
+        self.safe_flag = 0
+        self.novelty_flag = 0
+        self.recovery_phase = -1.
+
+        try:
+            self.button_press_mode
+        except AttributeError:
+            self.button_press_mode = button_press_mode
+
+
+    def _on_press(self, key):
+        if self.button_press_mode == 'toggle':
+            self._on_press_toggle(key)
+        elif self.button_press_mode == 'momentary':
+            self._on_press_momentary(key)
+        else: raise Exception()
+
+    def _on_release(self, key):
+        if self.button_press_mode == 'toggle':
+            pass
+        elif self.button_press_mode == 'momentary':
+            self._on_release_momentary(key)
+        else: raise Exception()
+
+
+    def _on_press_toggle(self, key):
+        if key == KeyCode.from_char("r"):
+            print("risk flag enabled")
+            self.risk_flag = 1
+            self.safe_flag = 0
+        if key == KeyCode.from_char("t"):
+            print("transparent (safe) flag enabled")
+            self.safe_flag = 1
+            self.risk_flag = 0
+        if key == KeyCode.from_char("p"):
+            print("phenomenon (novelty) flag enabled")
+            self.novelty_flag = 1
+        if key == KeyCode.from_char("q"):
+            print("all risk-related flags disabled")
+            self.risk_flag = 0
+            self.safe_flag = 0
+            self.novelty_flag = 0
+            self.recovery_phase = -1.0
+
+        if key == KeyCode.from_char("+"):
+            self.target_time_index += 20
+        if key == KeyCode.from_char("-"):
+            self.target_time_index -= 20
+
+        for i in range(10):
+            if key == KeyCode.from_char(str(i)):
+                fraction = float(i) / 10
+                try:
+                    trajectory_len = self.trajectory_len
+                except AttributeError:
+                    trajectory_len = 400
+                self.target_time_index = int(fraction * trajectory_len)
+                self.recovery_phase = fraction
+
+        super()._on_press(key)
+
+    def _on_press_momentary(self, key):
+        if key == KeyCode.from_char("r"):
+            print("risk flag enabled")
+            self.risk_flag = 1
+        if key == KeyCode.from_char("t"):
+            print("transparent (safe) flag enabled")
+            self.safe_flag = 1
+        if key == KeyCode.from_char("p"):
+            print("phenomenon (novelty) flag enabled")
+            self.novelty_flag = 1
+
+        if key == KeyCode.from_char("+"):
+            self.target_time_index += 20
+        if key == KeyCode.from_char("-"):
+            self.target_time_index -= 20
+
+        for i in range(10):
+            if key == KeyCode.from_char(str(i)):
+                fraction = float(i) / 10
+                try:
+                    trajectory_len = self.trajectory_len
+                except AttributeError:
+                    trajectory_len = 400
+                self.target_time_index = int(fraction * trajectory_len)
+                self.recovery_phase = fraction
+
+        super()._on_press(key)
+
+    def _on_release_momentary(self, key):
+        if key == KeyCode.from_char("r"):
+            self.risk_flag = 0
+        if key == KeyCode.from_char("t"):
+            self.safe_flag = 0
+        if key == KeyCode.from_char("p"):
+            self.novelty_flag = 0
+        for i in range(10):
+            if key == KeyCode.from_char(str(i)):
+                self.recovery_phase = -1.0
+
+
+if __name__ == '__main__':
+    rospy.init_node('listener', anonymous=True)
+    # fb = FrankaButtons()
+    
+    # raf = RiskAwareFeedback(button_press_mode="toggle")
+    raf = RiskAwareFeedback(button_press_mode="momentary")
+    input("Press enter to quit")

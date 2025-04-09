@@ -19,7 +19,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 
 from object_localization.tf_utils import CustomTransformListener
-
+from copy import deepcopy
 CAMERA_COLOR_TOPIC = '/camera/color/image_raw'
 
 class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
@@ -48,6 +48,8 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         self.goal_pose_pub = self.create_publisher(PoseStamped, "/panda/goal_pose", 5)
         self.create_subscription(PoseStamped, "/panda/curr_pose", self.curr_pose_callback, 5)
 
+        self.img_prev = None
+
     def curr_pose_callback(self, msg):
         self.curr_pos = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
         self.curr_ori_wxyz = [msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z]
@@ -60,12 +62,17 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         self._rate.sleep()
         self.timeout_counter = 0
         while rclpy.ok():
-            if self._img is None:
+            time.sleep(1)
+            if self._img is None or (self._img == self.img_prev):
                 self.get_logger().warning("No Image")
                 self._rate.sleep()
+                self.img_prev = deepcopy(self._img)
+                continue
             position = self.curr_pos
             ori = list_2_quaternion(self.curr_ori_wxyz)
             home_pose = pos_quat_2_pose_st(position, ori)
+            
+            self.img_prev = deepcopy(self._img)
             try:
                 resp = self.compute_box_tf.call(request=ComputeLocalization.Request(img=self._img))
                 box_tf = resp.pose
@@ -94,7 +101,7 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
             print("Localization step : ", self.timeout_counter, flush=True)
             print(f"position error {pos_error}, yaw error {yaw_error}", flush=True)
             print("", flush=True)
-            if (pos_error < self.position_accuracy and yaw_error < self.orientation_accuracy) or self.timeout_counter > self.timeout_counter_max:
+            if (pos_error < self.position_accuracy and yaw_error < self.orientation_accuracy) or self.timeout_counter >= self.timeout_counter_max:
                 print(f"Localization finished! final error: {pos_error + yaw_error}", flush=True)
                 return res
             self.timeout_counter = self.timeout_counter + 1

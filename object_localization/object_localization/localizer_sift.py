@@ -62,7 +62,9 @@ class Localizer(object):
         if len(good) > MIN_MATCH_COUNT:
             self._src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
             self._dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-        
+        else:
+            print("WARNING: LOCALIZER NOT FOUND TEMPLATE!", flush=True)
+
         try:
             M, mask = cv2.findHomography(self._src_pts, self._dst_pts, cv2.RANSAC, 5.0)
             matchesMask = mask.ravel().tolist()

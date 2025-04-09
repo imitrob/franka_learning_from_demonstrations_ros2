@@ -122,8 +122,8 @@ class Panda():
         goal = pos_quat_2_pose_st(pos_array, quat)
         goal.header.stamp = self.get_clock().now().to_msg()
 
-        ns_msg = [0, 0, 0, -2.4, 0, 2.4, 0.8] #ensure that the elbow is upward
-        self.go_to_pose_ik(goal, goal_configuration=ns_msg)
+        # ns_msg = [0, 0, 0, -2.4, 0, 2.4, 0.8] #ensure that the elbow is upward
+        self.go_to_pose_ik(goal)#, goal_configuration=ns_msg) # TODO: Works, but needs tuning
 
     def home_gripper(self):
         self.gripper.homing()
@@ -163,7 +163,7 @@ class Panda():
         time.sleep(0.2)
     
         # control robot to desired goal position
-    def go_to_pose_ik(self, goal_pose: PoseStamped, goal_configuration=None, interp_dist=0.01, interp_dist_joint=0.02): 
+    def go_to_pose_ik(self, goal_pose: PoseStamped, goal_configuration=None, interp_dist=0.002, interp_dist_joint=0.004): 
         # the goal pose should be of type PoseStamped. E.g. goal_pose=PoseStampled()
         # set_parameter(self,self.get_name(),"max_delta_lin",0.2)
         # set_parameter(self,self.get_name(),"max_delta_ori",0.5)
@@ -230,7 +230,8 @@ class Panda():
                 if self.safety_check:
                     i= i+1 
 
-                r.sleep()
+                # r.sleep()
+                time.sleep(0.01)
             self.set_stiffness(self.K_pos, self.K_pos, self.K_pos, self.K_ori, self.K_ori, self.K_ori, 0)
 
             time.sleep(1) 

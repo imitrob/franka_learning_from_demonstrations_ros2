@@ -21,8 +21,8 @@ def main():
     print("Side offset parameter: ", side_offset, flush=True)
     
     panda.home(height=height , front_offset=front_offset, side_offset=side_offset)
-    panda.offset_compensator(10)
-
+    panda.offset_compensator(20)
+    
     print("Done", flush=True)
 
 if __name__ == "__main__":

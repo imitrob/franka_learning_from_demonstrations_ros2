@@ -9,7 +9,7 @@ from cv_bridge import CvBridge
 import numpy as np
 from panda_control import SpinPandaNode
 import object_localization
-
+import time
 CAMERA_COLOR_TOPIC = "/camera/color/image_raw"
 CAMERA_DEPTH_TOPIC = "/camera/depth/image_rect_raw"
 
@@ -56,6 +56,7 @@ class Template():
 
         self.img_message_received = None
         self.panda.create_subscription(Image, CAMERA_COLOR_TOPIC, self.img_rec_clb, 5)
+        time.sleep(5.0) # wait while camera brightness stabilizes
         while self.img_message_received is None:
             rclpy.spin_once(self.panda, timeout_sec=10.0)
             print("waiting for message", flush=True)
