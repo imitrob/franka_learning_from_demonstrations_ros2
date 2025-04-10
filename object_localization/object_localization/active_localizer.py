@@ -19,7 +19,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 
 from object_localization.tf_utils import CustomTransformListener
-from copy import deepcopy
+
 CAMERA_COLOR_TOPIC = '/camera/color/image_raw'
 
 class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
@@ -48,31 +48,29 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         self.goal_pose_pub = self.create_publisher(PoseStamped, "/panda/goal_pose", 5)
         self.create_subscription(PoseStamped, "/panda/curr_pose", self.curr_pose_callback, 5)
 
-        self.img_prev = None
+        self._prev_img = None
 
     def curr_pose_callback(self, msg):
         self.curr_pos = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
         self.curr_ori_wxyz = [msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z]
 
     def image_callback(self, img):
+        self._prev_img = self._img
         self._img = img
-
+        
     def handle_request(self, req, res):
         print("Active localization started", flush=True)
         self._rate.sleep()
         self.timeout_counter = 0
         while rclpy.ok():
-            time.sleep(1)
-            if self._img is None or (self._img == self.img_prev):
+            if self._img is None or self._prev_img is None or self._img.data == self._prev_img.data:
                 self.get_logger().warning("No Image")
                 self._rate.sleep()
-                self.img_prev = deepcopy(self._img)
                 continue
             position = self.curr_pos
             ori = list_2_quaternion(self.curr_ori_wxyz)
             home_pose = pos_quat_2_pose_st(position, ori)
             
-            self.img_prev = deepcopy(self._img)
             try:
                 resp = self.compute_box_tf.call(request=ComputeLocalization.Request(img=self._img))
                 box_tf = resp.pose
@@ -95,6 +93,7 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
  
             assert self._transformed_pose.pose.position.z > 0.1
             self.goal_pose_pub.publish(self._transformed_pose)
+            time.sleep(3.0) # Note: waits for the move to end, but not guaranteed
             pos_error = np.linalg.norm(xy_yaw[:2])
             yaw_error = abs(xy_yaw[2])
             print("", flush=True)

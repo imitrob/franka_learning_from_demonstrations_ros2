@@ -35,6 +35,7 @@ from typing import Iterable
 # panda-py is chatty, activate information log level
 import logging
 logging.basicConfig(level=logging.INFO)
+from copy import deepcopy
 
 class Panda():
     def __init__(self,
@@ -89,8 +90,20 @@ class Panda():
         self.tf_broadcaster = TransformBroadcaster(self)
         time.sleep(1)
 
+        self.external_call_msg = None
+
+    def external_call_handler(self): 
+        # if receives a target pose from topic, it goes there by linear motion
+        while rclpy.ok():
+            time.sleep(0.1)
+            if self.external_call_msg is not None:
+                pose = deepcopy(self.external_call_msg)
+                self.external_call_msg = None
+                self.go_to_pose_ik(pose) # PoseStamped
+
     def external_call(self, msg):
-        self.move_to_pose_with_stampedpose(msg)
+        self.external_call_msg = msg
+        # self.move_to_pose_with_stampedpose(msg) # old without linear motion
 
     def move_to_pose_with_stampedpose(self, pose: PoseStamped):
         self.move_to_pose(
@@ -171,7 +184,7 @@ class Panda():
         self.move_to_pose_with_stampedpose(self.curr_pose)
         
         self.set_configuration(self.curr_joint)
-        self.set_stiffness(self.K_pos, self.K_pos, self.K_pos, 0, 0, 0, self.K_ns)
+        self.set_stiffness(self.K_pos, self.K_pos, self.K_pos, self.K_ori, self.K_ori, self.K_ori, self.K_ns) # Note: Legacy had zeros stiffness for rotations
 
         robot = rtb.models.Panda()
         position_start = self.curr_pos
@@ -305,7 +318,7 @@ class Panda():
 
     def ctrl_node(self, frequency=500):
         while True:
-            ctrl = controllers.CartesianImpedance(filter_coeff=1.0, impedance=np.diag([self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z]), nullspace_stiffness=self.nullspace_stiffness)
+            ctrl = controllers.CartesianImpedance(filter_coeff=0.5, impedance=np.diag([self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z]), nullspace_stiffness=self.nullspace_stiffness, damping_ratio=0.5)
             self.panda.start_controller(ctrl)
             try:
                 with self.panda.create_context(frequency=frequency, max_runtime=999) as ctx:
@@ -406,6 +419,8 @@ class Panda():
         updateparam_thread.start()
         feedback_thread = threading.Thread(target=self.feedback_thread, daemon=True)
         feedback_thread.start()
+        external_call_handler = threading.Thread(target=self.external_call_handler, daemon=True)
+        external_call_handler.start()
 
 
 class SpinPandaNode(Panda, SpinningRosNode):
