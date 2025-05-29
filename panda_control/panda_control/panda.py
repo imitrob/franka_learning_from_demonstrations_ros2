@@ -39,8 +39,8 @@ from copy import deepcopy
 
 class Panda():
     def __init__(self,
-                 K_pos: int = 600, # Default Positional stiffness
-                 K_ori: int = 50, # Default Orientation stiffness
+                 K_pos: int = 2000, # Default Positional stiffness
+                 K_ori: int = 80, # Default Orientation stiffness
                  K_ns: int = 0, # Default Nullspace stiffness
                  ):
         super(Panda, self).__init__()
@@ -318,7 +318,7 @@ class Panda():
 
     def ctrl_node(self, frequency=500):
         while True:
-            ctrl = controllers.CartesianImpedance(filter_coeff=0.5, impedance=np.diag([self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z]), nullspace_stiffness=self.nullspace_stiffness, damping_ratio=0.5)
+            ctrl = controllers.CartesianImpedance(filter_coeff=0.05, impedance=np.diag([self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z]), nullspace_stiffness=self.nullspace_stiffness, damping_ratio=0.3)
             self.panda.start_controller(ctrl)
             try:
                 with self.panda.create_context(frequency=frequency, max_runtime=999) as ctx:

@@ -204,8 +204,7 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
     def play_skill(self, name_skill, object_template_name, localize_box=True):
         if localize_box:
             if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
-                print('Service not available after waiting', flush=True)
-                return
+                raise Exception("Service not available after waiting")
             self.set_localizer_client.call(SetTemplate.Request(template_name=object_template_name))
             self.move_template_start()
             self.active_localizer_client.call(Trigger.Request())

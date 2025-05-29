@@ -9,6 +9,7 @@ import tf_transformations
 from lfd_msgs.srv import ComputeLocalization
 import numpy as np
 import time
+from copy import deepcopy
 from tf_transformations import euler_from_quaternion
 from queue import Queue
 import rclpy
@@ -41,21 +42,23 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         self._service = self.create_service(Trigger, 'active_localizer', self.handle_request, qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
 
 
-        self.position_accuracy = 0.001
+        self.position_accuracy = 0.003
         self.orientation_accuracy=0.2 *(np.pi/180)
-        self.timeout_counter_max = 2
+        self.timeout_counter_max = 50
 
         self.goal_pose_pub = self.create_publisher(PoseStamped, "/panda/goal_pose", 5)
         self.create_subscription(PoseStamped, "/panda/curr_pose", self.curr_pose_callback, 5)
 
-        self._prev_img = None
+        # self._prev_img = None
+        self.img_last_rec = 0.0
 
     def curr_pose_callback(self, msg):
         self.curr_pos = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
         self.curr_ori_wxyz = [msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z]
 
     def image_callback(self, img):
-        self._prev_img = self._img
+        # self._prev_img = deepcopy(self._img)
+        self.img_last_rec = time.time()
         self._img = img
         
     def handle_request(self, req, res):
@@ -63,8 +66,12 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         self._rate.sleep()
         self.timeout_counter = 0
         while rclpy.ok():
-            if self._img is None or self._prev_img is None or self._img.data == self._prev_img.data:
+            if self._img is None: # or self._prev_img is None or list(self._img.data) == list(self._prev_img.data):
                 self.get_logger().warning("No Image")
+                self._rate.sleep()
+                continue
+            if (time.time() - self.img_last_rec) > 1.0:
+                self.get_logger().warning("Img is not fresh")
                 self._rate.sleep()
                 continue
             position = self.curr_pos
@@ -93,6 +100,7 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
  
             assert self._transformed_pose.pose.position.z > 0.1
             self.goal_pose_pub.publish(self._transformed_pose)
+            self._rate.sleep()
             time.sleep(3.0) # Note: waits for the move to end, but not guaranteed
             pos_error = np.linalg.norm(xy_yaw[:2])
             yaw_error = abs(xy_yaw[2])

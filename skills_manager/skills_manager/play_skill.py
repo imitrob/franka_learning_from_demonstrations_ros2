@@ -23,9 +23,9 @@ def main():
 
     lfd.play_skill(name_skill, name_template, localize_box)
 
-    save = False
+    save = True
     if save:
-        lfd.save(name_skill)
+        lfd.save(name_skill+"_new")
 
 if __name__ == '__main__':
     main()
