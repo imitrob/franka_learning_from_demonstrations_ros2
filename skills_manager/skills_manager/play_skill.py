@@ -21,10 +21,10 @@ def main():
     print("Localize box: ", localize_box, flush=True)
     print("Localize template: ", name_template, flush=True)
 
-    lfd.play_skill(name_skill, name_template, localize_box)
+    success = lfd.play_skill(name_skill, name_template, localize_box)
 
     save = True
-    if save:
+    if save and success:
         lfd.save(name_skill+"_new")
 
 if __name__ == '__main__':

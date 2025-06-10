@@ -7,7 +7,7 @@ from launch.substitutions import LaunchConfiguration
 import os
 
 def generate_launch_description():
-    color_profile = DeclareLaunchArgument("rgb_camera.color_profile", default_value="848,480,3")
+    # color_profile = DeclareLaunchArgument("rgb_camera.color_profile", default_value="848,480,3")
 
     # Declare arguments
     template_name_arg = DeclareLaunchArgument(
@@ -16,19 +16,19 @@ def generate_launch_description():
         description='Template of the object to search during localization'
     )
 
-    # Include the rs_camera.launch.py from the realsense2_camera package
-    realsense_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('realsense2_camera'),
-                'launch',
-                'rs_launch.py'
-            )
-        ),
-        launch_arguments={
-            "rgb_camera.color_profile": "848,480,30",
-        }.items()
-    )
+    # # Include the rs_camera.launch.py from the realsense2_camera package
+    # realsense_launch = IncludeLaunchDescription(
+    #     PythonLaunchDescriptionSource(
+    #         os.path.join(
+    #             get_package_share_directory('realsense2_camera'),
+    #             'launch',
+    #             'rs_launch.py'
+    #         )
+    #     ),
+    #     launch_arguments={
+    #         "rgb_camera.color_profile": "848,480,30",
+    #     }.items()
+    # )
 
     # Define the node
     template_node = Node(
@@ -42,7 +42,7 @@ def generate_launch_description():
     # Return the launch description
     return LaunchDescription([
         template_name_arg,
-        color_profile,
-        realsense_launch,
+        # color_profile,
+        # realsense_launch,
         template_node
     ])

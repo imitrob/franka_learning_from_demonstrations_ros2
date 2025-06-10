@@ -43,7 +43,7 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
 
 
         self.position_accuracy = 0.003
-        self.orientation_accuracy=0.2 *(np.pi/180)
+        self.orientation_accuracy=0.5 *(np.pi/180)
         self.timeout_counter_max = 50
 
         self.goal_pose_pub = self.create_publisher(PoseStamped, "/panda/goal_pose", 5)
@@ -101,9 +101,10 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
             assert self._transformed_pose.pose.position.z > 0.1
             self.goal_pose_pub.publish(self._transformed_pose)
             self._rate.sleep()
-            time.sleep(3.0) # Note: waits for the move to end, but not guaranteed
             pos_error = np.linalg.norm(xy_yaw[:2])
             yaw_error = abs(xy_yaw[2])
+            time.sleep(pos_error * 2) # Note: waits for the move to end, but not guaranteed
+            time.sleep(0.1) # Note: waits for the move to end, but not guaranteed
             print("", flush=True)
             print("Localization step : ", self.timeout_counter, flush=True)
             print(f"position error {pos_error}, yaw error {yaw_error}", flush=True)

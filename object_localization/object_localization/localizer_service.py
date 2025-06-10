@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import yaml, time
-import rclpy
+import rclpy, os
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
 from object_localization.localizer_sift import Localizer
 import numpy as np
 
 from lfd_msgs.srv import ComputeLocalization, SetTemplate
+from std_srvs.srv import Trigger
 import tf_transformations
 
 from cv_bridge import CvBridge
@@ -15,7 +16,7 @@ from skills_manager.ros_param_manager import set_remote_parameters
 from skills_manager.ros_utils import SpinningRosNode
 
 from sensor_msgs.msg import CameraInfo
-
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 CAMERA_INFO_TOPIC = "/camera/color/camera_info"
 
 class LocalizationService(SpinningRosNode):
@@ -46,8 +47,20 @@ class LocalizationService(SpinningRosNode):
     def set_localizer(self, req, res):
         template_name = req.template_name
 
-        with open(f"{object_localization.package_path}/cfg/{template_name}/params.yaml") as f:
-            tf_dict = yaml.safe_load(f)
+        try:
+            with open(f"{object_localization.package_path}/cfg/{template_name}/params.yaml") as f:
+                tf_dict = yaml.safe_load(f)
+        except FileNotFoundError:
+            print("TEMPLATE DOES NOT EXIST!!!", flush=True)
+            print("TEMPLATE DOES NOT EXIST!!!", flush=True)
+            print("TEMPLATE DOES NOT EXIST!!!", flush=True)
+            print("TEMPLATE DOES NOT EXIST!!!", flush=True)
+            print("TEMPLATE DOES NOT EXIST!!!", flush=True)
+            print("TEMPLATE DOES NOT EXIST!!!", flush=True)
+            print("TEMPLATE DOES NOT EXIST!!!", flush=True)
+            print("TEMPLATE DOES NOT EXIST!!!", flush=True)
+            res.success = False
+            return res
 
         cropping = tf_dict['crop']
         depth = tf_dict['depth'] * 0.001
@@ -61,6 +74,7 @@ class LocalizationService(SpinningRosNode):
         template_path = f"{object_localization.package_path}/cfg/{template_name}/full_image.png"
         self._localizer = Localizer(template_path, cropping, depth)
         print(f"localizer set to {template_name}", flush=True)
+        res.success = True
         return res
 
     def camera_info_callback(self, msg):

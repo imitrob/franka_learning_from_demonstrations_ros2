@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 from object_localization.gui import Template
-import sys
 import rclpy
-from rclpy.node import Node
 
 from skills_manager.ros_param_manager import extract_param_value
+from skills_manager.lfd import LfD
+from skills_manager.ros_param_manager import set_remote_parameters
 
 def main():
     rclpy.init()
+
+    lfd = LfD()
+    lfd.start()
+
+    set_remote_parameters(lfd, 
+        [#"crop", "depth", 
+        "position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"],
+        [
+        #tf_dict['crop'], tf_dict['depth'], 
+        0.4, 0.0, 0.4, 1.0, 0.0, 0.0, 0.0],
+        server="localizer_node",
+    )
+
+    lfd.move_template_start()
+
     try:
         template = Template()
         param = template.panda.declare_parameter('template_name', "template")

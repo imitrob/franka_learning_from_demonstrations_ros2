@@ -11,7 +11,7 @@ from panda_control import Panda, SpinningRosNode
 from skills_manager.feedback import Feedback
 from skills_manager.insertion import Insertion
 from skills_manager.transfom import Transform 
-from panda_control.pose_transform_functions import position_2_array, pos_quat_2_pose_st, list_2_quaternion
+from panda_control.pose_transform_functions import position_2_array, pos_quat_2_pose_st, list_2_quaternion, invert_tf
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from skills_manager.ros_param_manager import get_remote_parameters
 import trajectory_data
@@ -111,7 +111,7 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
         quat_start = list_2_quaternion(self.recorded_ori_wxyz[:, 0])
         start = pos_quat_2_pose_st(self.recorded_traj[:, 0], quat_start)
          
-        self.go_to_pose(start)
+        self.go_to_pose_ik(start)
         self.set_stiffness(self.K_pos, self.K_pos, self.K_pos, self.K_ori, self.K_ori, self.K_ori, 0)
 
         self.time_index=0
@@ -180,6 +180,9 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
                 break
 
     def save(self, file='last'):
+        if self.final_transform is not None:
+            self.recorded_traj, self.recorded_ori_wxyz = self.transform_traj_ori(self.recorded_traj, self.recorded_ori_wxyz, invert_tf(self.final_transform))
+
         np.savez(trajectory_data.package_path + '/trajectories/' + str(file) + '.npz',
                  traj=self.recorded_traj,
                  ori=self.recorded_ori_wxyz,
@@ -201,11 +204,26 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
         
         self.filename=str(file)
 
+    def localize(self, object_template_name):
+        """ DRAFT """
+        if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
+            raise Exception("Service not available after waiting")
+        ret = self.set_localizer_client.call(SetTemplate.Request(template_name=object_template_name))
+        if not ret.success:
+            print("Returned because localizer not succesful", flush=True)
+            return False
+        self.move_template_start()
+        self.active_localizer_client.call(Trigger.Request())
+        self.compute_final_transform() 
+
     def play_skill(self, name_skill, object_template_name, localize_box=True):
         if localize_box:
             if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
                 raise Exception("Service not available after waiting")
-            self.set_localizer_client.call(SetTemplate.Request(template_name=object_template_name))
+            ret = self.set_localizer_client.call(SetTemplate.Request(template_name=object_template_name))
+            if not ret.success:
+                print("Returned because localizer not succesful", flush=True)
+                return False
             self.move_template_start()
             self.active_localizer_client.call(Trigger.Request())
             self.compute_final_transform() 
@@ -217,7 +235,8 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
             print(f"Execution", flush=True)
             self.execute()
         except KeyboardInterrupt:
-            pass
+            return False
+        return True
 
     def move_template_start(self):
         pose = get_remote_parameters(self, param_names=[

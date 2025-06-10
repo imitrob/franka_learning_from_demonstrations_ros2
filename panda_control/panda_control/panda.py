@@ -39,7 +39,7 @@ from copy import deepcopy
 
 class Panda():
     def __init__(self,
-                 K_pos: int = 2000, # Default Positional stiffness
+                 K_pos: int = 1000, # Default Positional stiffness
                  K_ori: int = 80, # Default Orientation stiffness
                  K_ns: int = 0, # Default Nullspace stiffness
                  ):
@@ -99,7 +99,7 @@ class Panda():
             if self.external_call_msg is not None:
                 pose = deepcopy(self.external_call_msg)
                 self.external_call_msg = None
-                self.go_to_pose_ik(pose) # PoseStamped
+                self.go_to_pose_ik_quick(pose) # PoseStamped
 
     def external_call(self, msg):
         self.external_call_msg = msg
@@ -176,6 +176,75 @@ class Panda():
         time.sleep(0.2)
     
         # control robot to desired goal position
+
+    def go_to_pose_ik_quick(self, goal_pose: PoseStamped, goal_configuration=None, interp_dist=0.002, interp_dist_joint=0.004):
+        r = self.create_rate(200)
+        self.move_to_pose_with_stampedpose(self.curr_pose)
+        
+        self.set_configuration(self.curr_joint)
+        
+        robot = rtb.models.Panda()
+        position_start = self.curr_pos
+        joint_start = np.array(self.curr_joint)
+        goal_array = np.array([goal_pose.pose.position.x, goal_pose.pose.position.y, goal_pose.pose.position.z])
+
+        # interpolate from start to goal with attractor distance of approx 1 cm
+        dist = np.sqrt(np.sum(np.subtract(position_start, goal_array)**2, axis=0))
+        
+        step_num_lin = math.floor(dist / interp_dist)
+        q_goal=np.quaternion(goal_pose.pose.orientation.w, goal_pose.pose.orientation.x, goal_pose.pose.orientation.y, goal_pose.pose.orientation.z)
+        if goal_configuration is None:
+            quaternion_array = np.array([goal_pose.pose.orientation.w, goal_pose.pose.orientation.x, goal_pose.pose.orientation.y, goal_pose.pose.orientation.z]) 
+            # normalize quaternion
+            quaternion_array = quaternion_array / np.linalg.norm(quaternion_array)
+            # Convert quaternion to rotation matrix
+            rotation_matrix = q2r(quaternion_array)
+
+            T = SE3.Rt(rotation_matrix, goal_array)
+
+            # Solve inverse kinematics, try 5 times
+            for i in range(5):
+                # sol = robot.ikine_LM(T, q0=joint_start)
+                sol = robot.ikine_LM(T,q0=joint_start)
+                if sol.success:
+                    goal_configuration = sol.q  # Joint configuration
+                    print("Feasible joint configuration found")
+                    break
+            if not sol.success:
+                for i in range(5):
+                    sol = robot.ikine_LM(T)
+                    if sol.success:
+                        goal_configuration = sol.q  # Joint configuration
+                        print("Feasible joint configuration found")
+                        break
+
+        # Check if the solution is valid
+        if goal_configuration is not None:
+             
+            joint_distance = np.abs(np.subtract(joint_start, goal_configuration))
+            max_joint_distance = np.max(joint_distance)
+            step_num_joint = math.ceil(max_joint_distance / interp_dist_joint)
+            # step_num_joint = int(np.ceil(np.linalg.norm(goal_configuration - joint_start) / interp_dist_joint))
+            step_num=np.max([step_num_joint,step_num_lin])+1
+        
+            pos_goal = np.vstack([np.linspace(start, end, step_num) for start, end in zip(position_start, [goal_pose.pose.position.x, goal_pose.pose.position.y, goal_pose.pose.position.z])]).T
+            joint_goal = np.vstack([np.linspace(start, end, step_num) for start, end in zip(joint_start, goal_configuration)]).T
+
+            
+            i=0
+            while i < step_num:
+                pose_goal = pos_quat_2_pose_st(pos_goal[i], q_goal) 
+                self.move_to_pose_with_stampedpose(pose_goal)
+                self.set_configuration(joint_goal[i])
+                if self.safety_check:
+                    i= i+1 
+
+                # r.sleep()
+                time.sleep(0.01)
+            
+        else:
+            print("No feasible joint configuration found or no joint configuration provided", flush=True)        
+
     def go_to_pose_ik(self, goal_pose: PoseStamped, goal_configuration=None, interp_dist=0.002, interp_dist_joint=0.004): 
         # the goal pose should be of type PoseStamped. E.g. goal_pose=PoseStampled()
         # set_parameter(self,self.get_name(),"max_delta_lin",0.2)

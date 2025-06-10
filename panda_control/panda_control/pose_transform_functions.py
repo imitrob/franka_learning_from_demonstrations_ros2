@@ -106,3 +106,14 @@ def interpolate_poses(pose_start: PoseStamped, pose_goal: PoseStamped, interp_di
         poses.append(pose_st)
 
     return poses
+
+def invert_tf(T):
+    """Invert a 4×4 homogeneous transform T more efficiently."""
+    R = T[:3, :3]        # rotation part
+    t = T[:3,  3]        # translation part
+    R_inv = R.T          # inverse of a rotation is its transpose
+    t_inv = -R_inv @ t   # new translation
+    T_inv = np.eye(4)
+    T_inv[:3, :3] = R_inv
+    T_inv[:3,  3] = t_inv
+    return T_inv

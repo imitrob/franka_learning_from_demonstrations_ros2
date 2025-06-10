@@ -10,6 +10,12 @@ def generate_launch_description():
         default_value='skill',
         description='Name of the skill to record'
     )
+    name_skill_arg = DeclareLaunchArgument(
+        'name_template',
+        default_value='template',
+        description='Name of the template to localize'
+    )
+
 
     recording_node = Node(
         package='skills_manager',
@@ -18,6 +24,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'name_skill': LaunchConfiguration('name_skill'),
+            'name_template': LaunchConfiguration('name_template'),
         }],
     )
 
