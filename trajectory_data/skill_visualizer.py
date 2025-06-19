@@ -206,4 +206,4 @@ def update_clicked_image(clickData, skill_file):
         return None
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8076)
+    app.run(debug=True, host='0.0.0.0', port=8076)

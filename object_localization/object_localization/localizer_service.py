@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import yaml, time
 import rclpy, os
-from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Header
+from geometry_msgs.msg import PoseStamped, Pose, Quaternion, Point
 from sensor_msgs.msg import Image
 from object_localization.localizer_sift import Localizer
 import numpy as np
 
-from lfd_msgs.srv import ComputeLocalization, SetTemplate
+from lfd_msgs.srv import ComputeLocalization, SetTemplate, GetScene
 from std_srvs.srv import Trigger
 import tf_transformations
 
@@ -41,8 +42,62 @@ class LocalizationService(SpinningRosNode):
         self._service = self.create_service(ComputeLocalization, 'compute_localization', self.handle_request, callback_group=self.callback_group)
         self._service_set_localizer = self.create_service(SetTemplate, 'set_localizer', self.set_localizer, callback_group=self.callback_group)
 
+        self._service_get_scene = self.create_service(GetScene, 'compute_object_positions', self.get_scene, qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
+
         self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self.camera_info_callback, 5)
         time.sleep(1)
+
+    def get_scene(self, req, res):
+        for folder_items in os.walk(f"{object_localization.package_path}/cfg/"):
+            all_templates = folder_items[1]
+            break
+        
+        res_names = []
+        res_poses = []
+
+        for template_name in all_templates:
+            with open(f"{object_localization.package_path}/cfg/{template_name}/params.yaml") as f:
+                tf_dict = yaml.safe_load(f)
+
+            cropping = tf_dict['crop']
+            depth = tf_dict['depth'] * 0.001
+
+            template_path = f"{object_localization.package_path}/cfg/{template_name}/full_image.png"
+            localizer = Localizer(template_path, cropping, depth)
+
+
+            cv_image = self.bridge.imgmsg_to_cv2(req.img, "bgr8")
+            localizer.set_image(cv_image)
+            localizer.set_camera_info(self.camera_info_msg)
+            # try:
+            localizer.detect_points()
+
+            try: # if not successful -> annotated image not exist
+                localizer.annoted_image()
+            except Exception as e:
+                print(e)
+                print('Returning identity')
+                return np.identity(4)
+            
+            tf_matrix = localizer.compute_full_tf_in_m()
+        
+            position = tf_matrix[0:3, 3]
+            try:
+                quaternion = tf_transformations.quaternion_from_matrix(tf_matrix[0:4, 0:4])
+            except np.linalg.LinAlgError:
+                quaternion = tf_transformations.quaternion_from_matrix(np.identity(4))
+
+            quaternion = quaternion/np.linalg.norm(quaternion)
+
+            print("Template: {template_name}", flush=True)
+            res_names.append(template_name)
+            print(position, flush=True)
+            print(quaternion, flush=True)
+            res_poses.append(PoseStamped(header=Header(), pose=Pose(position=Point(x=position[0], y=position[1], z=position[2]), orientation=Quaternion(x=quaternion[0], y=quaternion[1], z=quaternion[2], w=quaternion[3]))))
+
+        res.names = res_names
+        res.poses = res_poses
+        return res
 
     def set_localizer(self, req, res):
         template_name = req.template_name

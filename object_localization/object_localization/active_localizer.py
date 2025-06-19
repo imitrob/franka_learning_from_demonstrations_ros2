@@ -6,7 +6,7 @@ from panda_control import Panda, SpinningRosNode
 from panda_control.pose_transform_functions import orientation_2_quaternion, pose_st_2_transformation, position_2_array, pos_quat_2_pose_st, transformation_2_pose, transform_pose, list_2_quaternion, transform_pos_ori, list_2_quaternion, pos_quat_2_pose_st
 
 import tf_transformations
-from lfd_msgs.srv import ComputeLocalization
+from lfd_msgs.srv import ComputeLocalization, GetScene
 import numpy as np
 import time
 from copy import deepcopy
@@ -41,10 +41,12 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         self._window = Queue(maxsize=10)
         self._service = self.create_service(Trigger, 'active_localizer', self.handle_request, qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
 
+        self._get_scene_service = self.create_service(Trigger, 'get_scene', self.get_scene_request, qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
+        self.compute_scene_positions_client = self.create_client(GetScene, 'compute_object_positions', callback_group=self.callback_group)
 
         self.position_accuracy = 0.003
         self.orientation_accuracy=0.5 *(np.pi/180)
-        self.timeout_counter_max = 50
+        self.timeout_counter_max = 20
 
         self.goal_pose_pub = self.create_publisher(PoseStamped, "/panda/goal_pose", 5)
         self.create_subscription(PoseStamped, "/panda/curr_pose", self.curr_pose_callback, 5)
@@ -61,6 +63,10 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         self.img_last_rec = time.time()
         self._img = img
         
+    def get_scene_request(self, req, res):
+        resp = self.compute_scene_positions_client.call(request=ComputeLocalization.Request(img=self._img))
+        return resp
+
     def handle_request(self, req, res):
         print("Active localization started", flush=True)
         self._rate.sleep()

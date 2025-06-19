@@ -41,6 +41,7 @@ class LfD(Panda, Feedback, Insertion, Transform, CameraFeedback, SpinningRosNode
 
         self.set_localizer_client = self.create_client(SetTemplate, 'set_localizer', callback_group=self.callback_group)
         self.active_localizer_client = self.create_client(Trigger, 'active_localizer', qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
+        self.get_scene_client = self.create_client(Trigger, 'get_scene', qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
 
         time.sleep(1)
 
