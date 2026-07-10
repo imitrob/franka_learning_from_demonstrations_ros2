@@ -11,7 +11,7 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
 # from franka_gripper.msg import GraspActionGoal, HomingActionGoal, StopActionGoal, MoveActionGoal
-from panda_control.pose_transform_functions import  pos_quat_2_pose_st, list_2_quaternion, pose_2_transformation, interpolate_poses, q_norm, q_angle, q_slerp, build_quat_seq, min_angle_condition, step_slerp 
+from panda_control.pose_transform_functions import  pos_quat_2_pose_st, list_2_quaternion, pose_2_transformation, interpolate_poses, q_norm, q_angle, q_slerp, build_quat_seq, min_angle_condition, step_slerp
 from spatialmath import SE3 #pip install spatialmath-python
 from spatialmath.base import q2r
 import roboticstoolbox as rtb #pip install roboticstoolbox-python
@@ -25,7 +25,7 @@ from panda_py import controllers
 import numpy as np
 
 # Panda hostname/IP and Desk login information of your robot
-HOSTNAME = "192.168.89.140"
+HOSTNAME = "192.168.88.140"
 username = 'admin'
 password = '123456789'
 
@@ -74,7 +74,7 @@ class Panda():
         self.attractor_distance_threshold=0.05
         self.grip_open_width = OPEN_GRIPPER_WIDTH
         self.safety_check=True
-         
+
         self.translational_stiffness_X = self.K_pos
         self.translational_stiffness_Y = self.K_pos
         self.translational_stiffness_Z = self.K_pos
@@ -121,7 +121,7 @@ class Panda():
 
         self.create_subscription(PoseStamped, "/panda/goal_pose", self.external_call, 5)
         self.curr_pose_pub = self.create_publisher(PoseStamped, "/panda/curr_pose", 5)
-        
+
         self.tf_broadcaster = TransformBroadcaster(self)
         time.sleep(1)
 
@@ -133,15 +133,15 @@ class Panda():
         return panda_py.libfranka.has_realtime_kernel()
 
     def is_grasped(self) -> bool:
-        return self.gripper_state.is_grasped 
+        return self.gripper_state.is_grasped
 
     def IS_OPEN(self, value: float):
         return float(value) > self.grip_open_width / 2.0
 
     def is_open(self):
         return not self.gripper_state.is_grasped
-        
-    def external_call_handler(self): 
+
+    def external_call_handler(self):
         # if receives a target pose from topic, it goes there by linear motion
         while rclpy.ok():
             time.sleep(0.1)
@@ -161,13 +161,13 @@ class Panda():
             speed_factor=0.2,
         )
         self.ee_pos_goal_callback(pose)
-        
+
     def ee_pos_goal_callback(self, goal_conf):
         self.goal_pose = goal_conf
         self.curr_pos_goal = np.array([goal_conf.pose.position.x, goal_conf.pose.position.y, goal_conf.pose.position.z])
         self.curr_ori_goal_wxyz = np.array([goal_conf.pose.orientation.w, goal_conf.pose.orientation.x, goal_conf.pose.orientation.y, goal_conf.pose.orientation.z])
         self.safety_checker()
-        
+
     def move_gripper(self, width: float):
         self.move(width, speed=0.05)
 
@@ -202,7 +202,7 @@ class Panda():
 
     def stop_gripper(self):
         self.gripper.stop()
-        # self.stop_pub.publish(self.stop_command)  
+        # self.stop_pub.publish(self.stop_command)
 
     def set_configuration(self,joint):
         joint_des=Float32MultiArray()
@@ -210,43 +210,43 @@ class Panda():
         # self.configuration_pub.publish(joint_des)
         self.goal_q_nullspace = tuple(joint)
     def set_stiffness(self, k_t1: int, k_t2: int, k_t3: int,k_r1: int,k_r2: int, k_r3: int, k_ns: int):
-        
+
         if DIRECT_STIFFNESS_OPTION:
             k_t1, k_t2, k_t3 ,k_r1, k_r2, k_r3, k_ns = int(k_t1), int(k_t2), int(k_t3), int(k_r1), int(k_r2), int(k_r3), int(k_ns)
-            
+
             self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z, self.nullspace_stiffness = k_t1, k_t2, k_t3 ,k_r1, k_r2, k_r3, k_ns
             self.restart_control()
-            
+
         else:
             set_remote_parameters(self, [
                 "translational_stiffness_X", "translational_stiffness_Y", "translational_stiffness_Z",
                 "rotational_stiffness_X", "rotational_stiffness_Y", "rotational_stiffness_Z", "nullspace_stiffness"
                 ], [k_t1, k_t2, k_t3, k_r1, k_r2, k_r3, k_ns], server=self.get_name())
             self.restart_control()
-                        
+
 
 
     # control robot to desired goal position
-    def go_to_pose(self, goal_pose: PoseStamped, interp_dist=0.01, interp_dist_polar=0.01): 
+    def go_to_pose(self, goal_pose: PoseStamped, interp_dist=0.01, interp_dist_polar=0.01):
         # the goal pose should be of type PoseStamped. E.g. goal_pose=PoseStampled()
         r = self.create_rate(100)
-        
+
         poses=  interpolate_poses(self.curr_pose, goal_pose, interp_dist, interp_dist_polar)
         for pose in poses:
-            
+
             self.move_to_pose_with_stampedpose(pose)
             r.sleep()
-        self.move_to_pose_with_stampedpose(goal_pose)    
+        self.move_to_pose_with_stampedpose(goal_pose)
         time.sleep(0.2)
-    
+
         # control robot to desired goal position
 
     def go_to_pose_ik_quick(self, goal_pose: PoseStamped, goal_configuration=None, interp_dist=0.002, interp_dist_joint=0.004):
         r = self.create_rate(200)
         self.move_to_pose_with_stampedpose(self.curr_pose)
-        
+
         self.set_configuration(self.curr_joint)
-        
+
         robot = rtb.models.Panda()
         position_start = self.curr_pos
         joint_start = np.array(self.curr_joint)
@@ -254,7 +254,7 @@ class Panda():
 
         # interpolate from start to goal with attractor distance of approx 1 cm
         dist = np.sqrt(np.sum(np.subtract(position_start, goal_array)**2, axis=0))
-        
+
         step_num_lin = math.floor(dist / interp_dist)
 
         # Orientation slerp endpoints. The quick variant used to command the goal
@@ -271,7 +271,7 @@ class Panda():
         max_ori_step = math.radians(10.0)  # cap orientation change per step (~10 deg)
         step_num_ori = max(1, math.ceil(q_angle(q_start_wxyz, q_goal_wxyz) / max_ori_step))
         if goal_configuration is None:
-            quaternion_array = np.array([goal_pose.pose.orientation.w, goal_pose.pose.orientation.x, goal_pose.pose.orientation.y, goal_pose.pose.orientation.z]) 
+            quaternion_array = np.array([goal_pose.pose.orientation.w, goal_pose.pose.orientation.x, goal_pose.pose.orientation.y, goal_pose.pose.orientation.z])
             # normalize quaternion
             quaternion_array = quaternion_array / np.linalg.norm(quaternion_array)
             # Convert quaternion to rotation matrix
@@ -297,7 +297,7 @@ class Panda():
 
         # Check if the solution is valid
         if goal_configuration is not None:
-             
+
             joint_distance = np.abs(np.subtract(joint_start, goal_configuration))
             max_joint_distance = np.max(joint_distance)
             step_num_joint = math.ceil(max_joint_distance / interp_dist_joint)
@@ -308,7 +308,7 @@ class Panda():
             joint_goal = np.vstack([np.linspace(start, end, step_num) for start, end in zip(joint_start, goal_configuration)]).T
             quat_goal = build_quat_seq(q_start_wxyz, q_goal_wxyz, step_num)
 
-            
+
             i=0
             while i < step_num:
                 qw, qx, qy, qz = quat_goal[i]
@@ -322,9 +322,9 @@ class Panda():
                 # Per-step dwell paces the whole motion: larger = slower & gentler,
                 # which avoids reflex errors on bigger pose changes.
                 time.sleep(0.01)
-            
+
         else:
-            print("No feasible joint configuration found or no joint configuration provided", flush=True)        
+            print("No feasible joint configuration found or no joint configuration provided", flush=True)
 
     def go_to_pose_ik(self, goal_pose: PoseStamped, goal_configuration=None,
                     interp_dist=0.002, interp_dist_joint=0.008,
@@ -333,7 +333,7 @@ class Panda():
         self.set_stiffness(1000,1000,1000,80,80,80,0)
         # self.move_to_pose_with_stampedpose(self.curr_pose)
         # self.set_configuration(self.curr_joint)
-        
+
         robot = rtb.models.Panda()
 
         pos_start = np.array(self.curr_pos, dtype=float)
@@ -435,21 +435,21 @@ class Panda():
         curr_pos_desired = np.copy(self.curr_pos_goal )
         for _ in range(steps):
             curr_quat_goal= list_2_quaternion(self.curr_ori_goal_wxyz)
-            curr_pos_goal = self.curr_pos_goal 
-            curr_quat = list_2_quaternion(self.curr_ori_wxyz)    
-            
-                    
-            quat_diff = curr_quat_desired * curr_quat.inverse() 
-            lin_diff = curr_pos_desired - self.curr_pos 
-            
-            
+            curr_pos_goal = self.curr_pos_goal
+            curr_quat = list_2_quaternion(self.curr_ori_wxyz)
+
+
+            quat_diff = curr_quat_desired * curr_quat.inverse()
+            lin_diff = curr_pos_desired - self.curr_pos
+
+
             quat_goal_new = quat_diff * curr_quat_goal
             goal_pos = curr_pos_goal + lin_diff
-            
+
             goal_pose = pos_quat_2_pose_st(goal_pos, quat_goal_new)
-            self.move_to_pose_with_stampedpose(goal_pose) 
+            self.move_to_pose_with_stampedpose(goal_pose)
             time.sleep(0.2)
-            
+
 
     def broadcast_transform(self):
         # Fetch robot state or hardcoded transformation for testing
@@ -509,22 +509,22 @@ class Panda():
                         if (self.goal_position is not None) and (self.goal_orientation is not None) and (self.curr_ori_xyzw is not None):
                             if (np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos)) > HIGH_POINT_DIFFERENCE) or \
                                 min_angle_condition(self.goal_orientation, self.curr_ori_xyzw) > HIGH_ORI_DIFFERENCE:
-                                
+
                                 self.get_logger().warning(f"contror high set point difference {np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos))}  {min_angle_condition(self.goal_orientation, self.curr_ori_xyzw) > HIGH_ORI_DIFFERENCE}")
 
                                 # direction = (np.array(self.goal_position) - np.array(self.curr_pos)) / np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos))
                                 # new_goal_position = self.curr_pos + direction * HIGH_POINT_DIFFERENCE * 0.5
-                                
+
                                 # new_goal_orientation = step_slerp(
                                 #     self.goal_orientation,
-                                #     self.curr_ori_xyzw, 
+                                #     self.curr_ori_xyzw,
                                 #     HIGH_ORI_DIFFERENCE * 0.5,
                                 # )
 
                                 # self.get_logger().warning(f"{self.curr_pos}, {self.curr_ori_xyzw}, || , {new_goal_position}, {new_goal_orientation}")
 
                                 # ctrl.set_control(new_goal_position, new_goal_orientation)
-                                time.sleep(0.001) # Needed! Enforce consistent rate on non rt PC                        
+                                time.sleep(0.001) # Needed! Enforce consistent rate on non rt PC
                                 continue
 
                         if (self.goal_position is not None) and (self.goal_orientation is not None):
@@ -539,14 +539,14 @@ class Panda():
             except RuntimeError as e:
                 print(f"Recovering from libfranka exception: {str(e)}", flush=True)
 
-    def move_to_pose(self, 
+    def move_to_pose(self,
                      position: Iterable[float], # xyz
-                     orientation: Iterable[float], # xyzw 
+                     orientation: Iterable[float], # xyzw
                      speed_factor: float,
                     ):
         self.goal_position = tuple(position)
         self.goal_orientation = tuple(orientation)
-        self.goal_q_nullspace = None        
+        self.goal_q_nullspace = None
 
     def grasp(self, *args, **kwargs):
         self.gripper.grasp(*args, **kwargs)
@@ -559,7 +559,7 @@ class Panda():
         return round(self.gripper_state.width, 2)
 
     @property
-    def force(self): # Get current force 
+    def force(self): # Get current force
         robot_state = self.panda.get_state()
         external_wrench = np.array(robot_state.O_F_ext_hat_K)  # [Fx, Fy, Fz, Tx, Ty, Tz]
         # Extract forces and torques
@@ -579,7 +579,7 @@ class Panda():
     @property
     def curr_pos(self):
         return self.panda.get_position()
-    
+
     @property
     def curr_ori_xyzw(self):
         return self.panda.get_orientation(scalar_first=False)
@@ -595,7 +595,7 @@ class Panda():
     def update_params_thread(self):
         while rclpy.ok():
             time.sleep(UPDATE_THREAD_INTERVAL)
-            
+
             last_stiffness = self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X,self.rotational_stiffness_Y, self.rotational_stiffness_Z, self.nullspace_stiffness
             stiffness = get_remote_parameters(self, param_names=[
                 "translational_stiffness_X",
@@ -676,4 +676,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-    
