@@ -20,8 +20,17 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 
 from object_localization.tf_utils import CustomTransformListener
+# Reused rather than restated: "base" is the name scene consumers expect, while
+# the TF chain is broadcast under panda_link0.
+from object_localization.localizer_service import ROBOT_BASE_TF_FRAME, SCENE_FRAME_ID
 
 CAMERA_COLOR_TOPIC = '/camera/color/image_raw'
+
+# The pose every template is captured at -- Panda.home()'s defaults
+# (front_offset, side_offset, height). SIFT matching degrades as the camera
+# leaves it, so this doubles as the pose at which a scene can be believed.
+SCENE_HOME_POSITION = np.array([0.4, 0.0, 0.4])
+SCENE_NAME = "active_localizer_scene"
 
 import threading
 import scene_msgs.msg as scene_ros
@@ -62,62 +71,162 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         self.curr_ori_wxyz = None
 
         self.scene_pub = self.create_publisher(scene_ros.Scene, "/scene", 5)
-        # Off until asked. start_publishing_scene / stop_publishing_scene are the
-        # switch -- lfd.py and SceneGetterViaObjectLocalizer already call them, so
-        # gating the thread's *existence* on a module constant made them inert.
+        # Off until asked, where "asked" now also means somebody subscribed.
+        # start_publishing_scene / stop_publishing_scene remain the explicit
+        # switch that lfd.py and SceneGetterViaObjectLocalizer throw; treating a
+        # subscriber as the same request means opening the gestures dashboard is
+        # enough to watch the scene, and closing it stops the SIFT work rather
+        # than leaving it competing with the servo loop for nobody's benefit.
         self.publishing_scene = False
+        self.declare_parameter("scene_rate", 1.0)
+        self.declare_parameter("scene_home_tolerance", 0.05)
+
+        # Last poses actually recognised, and the image stamp they were seen at.
+        # Republished while the view cannot be trusted so that a consumer can
+        # grey them out, instead of objects blinking out of existence every time
+        # the arm leaves home.
+        self._scene_objects = []
+        self._scene_observed_at = None
+
         spinning_thread = threading.Thread(target=self.publish_scene_thread, args=(), daemon=True)
         spinning_thread.start()
+
+    def _untrustworthy_view(self):
+        """Why the current frame cannot be believed, or None when it can.
+
+        The home check is the one that matters. Every template is captured with
+        the arm at home, so SIFT stops matching as the view departs from it, and
+        a miss then means "cannot see" rather than "not there". At home the
+        distinction runs the other way: a template that stops matching really has
+        been picked up or moved, and must vanish from the scene rather than
+        linger at a pose it no longer occupies.
+        """
+        if self._img is None:
+            return "no image yet"
+        # Same freshness rule handle_request uses: a stale frame yields a stale
+        # scene, and the server cannot tell the difference.
+        if (time.time() - self.img_last_rec) > 1.0:
+            return "image is not fresh"
+        # The arm transform is what get_scene actually needs, and its absence is
+        # the difference between "the table is empty" and "I have no idea where the
+        # camera is". Checked here rather than left to get_scene because the
+        # service can only answer with an empty response either way: without this
+        # a missing transform silently overwrites the remembered scene with an
+        # empty one and the dashboard shows nothing, with no reason given.
+        translation, _ = self.lookup_relative_transform(ROBOT_BASE_TF_FRAME, "panda_hand")
+        if translation is None:
+            return (f"no {ROBOT_BASE_TF_FRAME} -> panda_hand transform; the camera "
+                    f"rides on the end effector, so there is nowhere to put the "
+                    f"objects (is the panda node running? otherwise: "
+                    f"ros2 run panda_control panda_idle)")
+
+        if self.curr_pos is None:
+            # No pose feed to judge distance from home with. The transform above
+            # is the hard requirement, so let it proceed rather than refusing on a
+            # missing topic -- though without /panda/curr_pose the home check
+            # below cannot run, and an off-home miss will look like a removal.
+            return None
+        distance = float(np.linalg.norm(np.array(self.curr_pos, dtype=float) - SCENE_HOME_POSITION))
+        tolerance = float(self.get_parameter("scene_home_tolerance").value)
+        if distance > tolerance:
+            return f"arm is {distance:.3f} m from home (tolerance {tolerance:.3f} m)"
+        return None
+
+    def _recognise_objects(self, SceneObject):
+        """Ask the localizer what it can see, as SceneObjects. None on failure."""
+        scene_response = self.compute_scene_positions_client.call(
+            GetScene.Request(img=self._img))
+        if scene_response is None:
+            return None
+
+        # The server resolves poses in the robot base frame at the image's own
+        # stamp, so there is nothing left to transform here. In particular do NOT
+        # route these through self.transform(): that is the servoing helper, and
+        # it clamps z to the home EE height and flattens orientation.
+        return [
+            SceneObject.from_dict(name, {
+                "position": [
+                    posestamped.pose.position.x,
+                    posestamped.pose.position.y,
+                    posestamped.pose.position.z,
+                ],
+                "orientation": [
+                    posestamped.pose.orientation.x,
+                    posestamped.pose.orientation.y,
+                    posestamped.pose.orientation.z,
+                    posestamped.pose.orientation.w,
+                ],
+                "params": "",
+            })
+            for name, posestamped in zip(scene_response.names, scene_response.pose)
+        ]
 
     def publish_scene_thread(self):
         from scene_getter.scene_lib.scene import Scene
         from scene_getter.scene_lib.scene_object import SceneObject
 
-        while True:
-            time.sleep(1.0)
-            if not self.publishing_scene or self._img is None:
-                continue
-            # Same freshness rule handle_request uses: a stale frame yields a
-            # stale scene, and the server cannot tell the difference.
-            if (time.time() - self.img_last_rec) > 1.0:
-                self.get_logger().warning("[scene] image is not fresh, skipping")
-                continue
+        # Remembered so a sustained hold is logged once, not once a cycle.
+        reported = "startup"
+        # Kept outside the loop so a failure to read the parameter cannot turn
+        # this into a hot loop -- the previous period still applies.
+        period = 1.0
+
+        while rclpy.ok():
+            time.sleep(period)
 
             # Everything below is inside try/except because this runs in a bare
             # thread: an unhandled exception would kill it silently and publishing
-            # would simply stop with nothing in the log.
+            # would simply stop with nothing in the log. That includes the
+            # subscriber count, which raises once the node is destroyed.
             try:
-                scene_response = self.compute_scene_positions_client.call(
-                    GetScene.Request(img=self._img))
-                if scene_response is None:
-                    self.get_logger().warning("[scene] compute_object_positions returned nothing")
+                period = 1.0 / max(float(self.get_parameter("scene_rate").value), 0.01)
+
+                # Somebody listening on /scene *is* the request to publish:
+                # opening the gestures dashboard starts the scene and closing it
+                # stops the SIFT work. The explicit flag still forces it on for
+                # lfd.py, which wants poses before an action without subscribing.
+                if not (self.publishing_scene or self.scene_pub.get_subscription_count() > 0):
                     continue
 
-                # The server resolves poses in the robot base frame at the image's
-                # own stamp, so there is nothing left to transform here. In
-                # particular do NOT route these through self.transform(): that is
-                # the servoing helper, and it clamps z to the home EE height and
-                # flattens orientation.
-                scene_objects = [
-                    SceneObject.from_dict(name, {
-                        "position": [
-                            posestamped.pose.position.x,
-                            posestamped.pose.position.y,
-                            posestamped.pose.position.z,
-                        ],
-                        "orientation": [
-                            posestamped.pose.orientation.x,
-                            posestamped.pose.orientation.y,
-                            posestamped.pose.orientation.z,
-                            posestamped.pose.orientation.w,
-                        ],
-                        "params": "",
-                    })
-                    for name, posestamped in zip(scene_response.names, scene_response.pose)
-                ]
+                holding = self._untrustworthy_view()
+                if holding is None:
+                    recognised = self._recognise_objects(SceneObject)
+                    if recognised is None:
+                        holding = "compute_object_positions returned nothing"
+                    else:
+                        # Replace wholesale rather than merge: at home, a template
+                        # that no longer matches is genuinely gone.
+                        self._scene_objects = recognised
+                        self._scene_observed_at = self._img.header.stamp
 
-                scene = Scene(name="active_localizer_scene", objects=scene_objects)
-                self.scene_pub.publish(scene.to_ros())
+                if holding != reported:
+                    if holding is None:
+                        self.get_logger().info("[scene] observing")
+                    else:
+                        self.get_logger().warning(
+                            f"[scene] {holding}: holding the last seen poses, stamped "
+                            f"when they were seen so consumers can grey them out")
+                    reported = holding
+
+                if self._scene_observed_at is None:
+                    # Nothing has ever been recognised, so there is no scene to
+                    # describe and no honest stamp to put on one. Note this is
+                    # not the same as an *empty* scene: once something has been
+                    # looked at, "I see nothing" is a real answer and has to go
+                    # out, or an object that was picked up would linger on the
+                    # dashboard for the rest of the session.
+                    continue
+
+                scene = Scene(name=SCENE_NAME, objects=self._scene_objects)
+                message = scene.to_ros()
+                # Stamped when the poses were *observed*, not when republished, so
+                # age tells a consumer whether to trust them. This is the only
+                # staleness signal on the wire: SceneObject.params is free-form
+                # description text that get_params() feeds downstream, so it must
+                # not be overloaded with a status flag.
+                message.header.stamp = self._scene_observed_at
+                message.header.frame_id = SCENE_FRAME_ID
+                self.scene_pub.publish(message)
             except Exception as error:  # noqa: BLE001 -- keep the thread alive
                 self.get_logger().error(f"[scene] publish failed: {error}")
 

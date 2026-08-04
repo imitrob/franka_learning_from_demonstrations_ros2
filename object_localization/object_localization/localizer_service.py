@@ -4,7 +4,7 @@ import rclpy, os
 from std_msgs.msg import Header
 from geometry_msgs.msg import PoseStamped, Pose, Quaternion, Point
 from sensor_msgs.msg import Image
-from object_localization.localizer_sift import Localizer
+from object_localization.localizer_sift import Localizer, detect_scene_features
 import numpy as np
 
 from lfd_msgs.srv import ComputeLocalization, SetTemplate, GetScene
@@ -18,6 +18,7 @@ from object_localization.tf_utils import CustomTransformListener
 from skills_manager.ros_param_manager import set_remote_parameters
 from skills_manager.ros_utils import SpinningRosNode
 
+from rclpy.duration import Duration
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
@@ -57,6 +58,14 @@ class LocalizationService(CustomTransformListener, SpinningRosNode):
         # Deliberately separate from localizer_sift.MIN_MATCH_COUNT, which the
         # working servo path depends on and which must not change.
         self.declare_parameter("min_inliers", 10)
+        # How far an image stamp may sit beyond the newest TF sample before the
+        # frame is dropped. A broadcaster at N Hz leaves a 1/N second hole after
+        # each sample, and the camera's pipeline latency is shorter than that hole
+        # at 10 Hz, so images land inside it and tf2 refuses to extrapolate
+        # forward. Bounded rather than unlimited: the scene is only trusted near
+        # home, where the arm is parked, so a few ms of staleness costs nothing --
+        # but a second of it would silently localise against the wrong pose.
+        self.declare_parameter("tf_future_tolerance", 0.05)
 
         self._rate = self.create_rate(5)
         # Template images and their SIFT descriptors are immutable, so build each
@@ -99,10 +108,14 @@ class LocalizationService(CustomTransformListener, SpinningRosNode):
         objects wherever the arm has since moved to.
         """
         at_time = Time.from_msg(stamp)
+        tolerance = Duration(
+            seconds=float(self.get_parameter("tf_future_tolerance").value))
         base_hand_t, base_hand_r = self.lookup_relative_transform(
-            ROBOT_BASE_TF_FRAME, "panda_hand", at_time=at_time)
+            ROBOT_BASE_TF_FRAME, "panda_hand", at_time=at_time,
+            future_tolerance=tolerance)
         hand_cam_t, hand_cam_r = self.lookup_relative_transform(
-            "panda_hand", CAMERA_TF_FRAME, at_time=at_time)
+            "panda_hand", CAMERA_TF_FRAME, at_time=at_time,
+            future_tolerance=tolerance)
         if base_hand_t is None or hand_cam_t is None:
             return None
 
@@ -142,6 +155,11 @@ class LocalizationService(CustomTransformListener, SpinningRosNode):
         z_plane = float(self.get_parameter("z_plane").value)
         min_inliers = int(self.get_parameter("min_inliers").value)
         cv_image = self.bridge.imgmsg_to_cv2(req.img, "bgr8")
+        # Detect on the frame once and share it: every template matches against
+        # this same picture, and detecting was ~133 ms of the ~160 ms each
+        # template cost. Turns N templates from N*160 ms into 133 + N*27 ms,
+        # which is the difference between 0.7 Hz and 3 Hz at eight templates.
+        scene_features = detect_scene_features(cv_image)
 
         res_names = []
         res_poses = []
@@ -152,7 +170,9 @@ class LocalizationService(CustomTransformListener, SpinningRosNode):
 
             localizer.set_image(cv_image)
             localizer.set_camera_info(self.camera_info_msg)
-            localizer.detect_points()
+            # annotate=False: the /SIFT_localization debug image is another
+            # ~20 ms per template and only the servo path ever reads it.
+            localizer.detect_points(scene_features=scene_features, annotate=False)
 
             match = localizer.measure_object()
             if match is None:

@@ -25,7 +25,7 @@ from panda_py import controllers
 import numpy as np
 
 # Panda hostname/IP and Desk login information of your robot
-HOSTNAME = "192.168.89.140"
+HOSTNAME = "192.168.88.140"
 username = 'admin'
 password = '123456789'
 

@@ -23,6 +23,9 @@ setup(
     entry_points={
         'console_scripts': [
             'panda_test = panda_control.panda:main',
+            # Read-only arm pose feed, so get_scene has a camera transform while
+            # the full panda node is not running. Exclusive with it.
+            'panda_idle = panda_control.panda_idle:main',
         ],
     },
 )

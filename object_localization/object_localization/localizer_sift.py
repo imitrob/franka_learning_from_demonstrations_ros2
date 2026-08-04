@@ -24,6 +24,22 @@ class Match(NamedTuple):
     inliers: int
 
 
+def detect_scene_features(image):
+    """SIFT keypoints and descriptors for one frame, shareable across templates.
+
+    get_scene matches every saved template against the same picture, and
+    detecting on that picture costs ~133 ms of the ~160 ms each template used to
+    take. Detecting once per frame instead of once per template is what lets the
+    scene be published at a useful rate with more than one template saved.
+
+    A fresh detector per call rather than a shared one: SIFT_create() costs about
+    a microsecond, while sharing a cv2.SIFT across the reentrant callback group
+    LocalizationService uses would be a data race for no gain.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return cv2.SIFT_create().detectAndCompute(gray, None)
+
+
 class Localizer(object):
 
     def __init__(self, template, cropping, depth):
@@ -78,7 +94,16 @@ class Localizer(object):
         self._pixel_m_factor_u =  self._fx / self._box_depth
         self._pixel_m_factor_v =  self._fy / self._box_depth
 
-    def detect_points(self):
+    def detect_points(self, scene_features=None, annotate=True):
+        """Match this template into the current image.
+
+        scene_features -- (keypoints, descriptors) from detect_scene_features()
+            for the current frame. Pass them when several templates share one
+            picture; leave as None to detect here, which is what the servo path
+            does and what this method has always done.
+        annotate -- build the /SIFT_localization debug image. Costs ~20 ms per
+            template and only the servo path ever reads it.
+        """
         # Clear last frame's result first. Instances are reused now, so leaving
         # stale _src_pts behind would let a template that matched once keep
         # reporting that old position forever.
@@ -86,10 +111,12 @@ class Localizer(object):
         self._dst_pts = None
         self._annoted_image = None
 
-        gray = cv2.cvtColor(self._img, cv2.COLOR_BGR2GRAY)
-
         kp1, des1 = self._kp_template, self._des_template
-        kp2, des2 = self._sift.detectAndCompute(gray, None)
+        if scene_features is None:
+            kp2, des2 = self._sift.detectAndCompute(
+                cv2.cvtColor(self._img, cv2.COLOR_BGR2GRAY), None)
+        else:
+            kp2, des2 = scene_features
         if des1 is None or des2 is None or len(des2) < 2:
             print("WARNING: LOCALIZER NOT FOUND TEMPLATE!", flush=True)
             return
@@ -108,6 +135,9 @@ class Localizer(object):
             self._dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
         else:
             print("WARNING: LOCALIZER NOT FOUND TEMPLATE!", flush=True)
+            return
+
+        if not annotate:
             return
 
         try:

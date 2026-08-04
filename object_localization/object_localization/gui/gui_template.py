@@ -89,7 +89,8 @@ class Template():
             cv2.imshow(f"image", self.image)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-            
+        cv2.destroyAllWindows()
+
         depth_row=depth[self.params['crop'][2]:self.params['crop'][3], self.params['crop'][0]:self.params['crop'][1]].reshape(-1)
         self.params['depth'] = float(np.median(depth_row))
 

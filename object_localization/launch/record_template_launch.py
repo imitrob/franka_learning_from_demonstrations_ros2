@@ -1,36 +1,18 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from ament_index_python.packages import get_package_share_directory
+from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
-import os
 
 def generate_launch_description():
-    color_profile = DeclareLaunchArgument("rgb_camera.color_profile", default_value="848,480,3")
-
     # Declare arguments
     template_name_arg = DeclareLaunchArgument(
-        'name_template', 
-        default_value='cube_template', 
+        'name_template',
+        default_value='cube_template',
         description='Template of the object to search during localization'
     )
 
-    # Include the rs_camera.launch.py from the realsense2_camera package
-    realsense_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('realsense2_camera'),
-                'launch',
-                'rs_launch.py'
-            )
-        ),
-        launch_arguments={
-            "rgb_camera.color_profile": "848,480,30",
-        }.items()
-    )
-
-    # Define the node
     template_node = Node(
         package='object_localization',
         executable='record_template',
@@ -39,10 +21,16 @@ def generate_launch_description():
         parameters=[{'name_template': LaunchConfiguration('name_template')}]
     )
 
+    shutdown_on_record_exit = RegisterEventHandler(
+        OnProcessExit(
+            target_action=template_node,
+            on_exit=[EmitEvent(event=Shutdown(reason='record_template finished'))]
+        )
+    )
+
     # Return the launch description
     return LaunchDescription([
         template_name_arg,
-        color_profile,
-        realsense_launch,
-        template_node
+        template_node,
+        shutdown_on_record_exit
     ])
