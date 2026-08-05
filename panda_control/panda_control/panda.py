@@ -39,6 +39,7 @@ from typing import Iterable
 import logging
 logging.basicConfig(level=logging.WARNING)
 from copy import deepcopy
+from panda_control.home_pose import HOME_POSE
 
 ### SUPER FAST STIFFNESS SETTING - NO ROS PARAM SET (cannot be changed it remotely)
 DIRECT_STIFFNESS_OPTION = True
@@ -178,7 +179,10 @@ class Panda():
         self.gripper.stop()
         self.gripper.grasp(width=width, speed=0.05, force=50, epsilon_inner=0.055, epsilon_outer=0.055)
 
-    def home(self, height=0.4, front_offset=0.4, side_offset=0.0):
+    def home(self,
+             height=HOME_POSE.position[2],
+             front_offset=HOME_POSE.position[0],
+             side_offset=HOME_POSE.position[1]):
         # go to joint target joints of home position
         self.restart_control(do_homing=True)
         # redundant:
@@ -187,7 +191,7 @@ class Panda():
         self.set_stiffness(self.K_pos, self.K_pos, self.K_pos, self.K_ori, self.K_ori, self.K_ori, 0)
 
         pos_array = np.array([front_offset, side_offset, height])
-        quat = quaternion.quaternion(0, 1, 0, 0)
+        quat = quaternion.quaternion(*HOME_POSE.orientation_wxyz)
         goal = pos_quat_2_pose_st(pos_array, quat)
         goal.header.stamp = self.get_clock().now().to_msg()
 
@@ -675,5 +679,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    

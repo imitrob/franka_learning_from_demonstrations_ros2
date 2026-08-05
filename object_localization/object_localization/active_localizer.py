@@ -3,6 +3,7 @@ from std_srvs.srv import Trigger
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image
 from panda_control import Panda, SpinningRosNode
+from panda_control.home_pose import HOME_POSE
 from panda_control.pose_transform_functions import orientation_2_quaternion, pose_st_2_transformation, position_2_array, pos_quat_2_pose_st, transformation_2_pose, transform_pose, list_2_quaternion, transform_pos_ori, list_2_quaternion, pos_quat_2_pose_st
 
 import tf_transformations
@@ -26,10 +27,9 @@ from object_localization.localizer_service import ROBOT_BASE_TF_FRAME, SCENE_FRA
 
 CAMERA_COLOR_TOPIC = '/camera/color/image_raw'
 
-# The pose every template is captured at -- Panda.home()'s defaults
-# (front_offset, side_offset, height). SIFT matching degrades as the camera
-# leaves it, so this doubles as the pose at which a scene can be believed.
-SCENE_HOME_POSITION = np.array([0.4, 0.0, 0.4])
+# SIFT matching degrades as the camera leaves the canonical home pose, so this
+# doubles as the position at which a scene can be believed.
+SCENE_HOME_POSITION = np.asarray(HOME_POSE.position)
 SCENE_NAME = "active_localizer_scene"
 
 import threading

@@ -47,6 +47,7 @@ from sensor_msgs.msg import CameraInfo, Image
 import tf2_ros
 
 import object_localization
+from panda_control.home_pose import HOME_POSE
 from object_localization.geometry import pixel_to_base
 from object_localization.active_localizer import SCENE_HOME_POSITION
 from object_localization.localizer_service import (
@@ -62,8 +63,9 @@ TEMPLATE = "robothonboard"
 # The pose the spec calls "home": 0.4 m out, on the centreline, 0.4 m up, with
 # the hand rotated 180 deg about base x so the tool -- and the camera bolted next
 # to it -- looks down at the table.
-HOME_POSITION = [0.4, 0.0, 0.4]
-HOME_ORIENTATION = [1.0, 0.0, 0.0, 0.0]  # xyzw
+HOME_POSITION = list(HOME_POSE.position)
+HOME_ORIENTATION = [*HOME_POSE.orientation_wxyz[1:],
+                    HOME_POSE.orientation_wxyz[0]]  # xyzw
 # active_localizer's scene_home_tolerance default: how far the arm may sit from
 # the capture pose before a miss is read as "cannot see" instead of "gone".
 SCENE_HOME_TOLERANCE = 0.05
@@ -1131,10 +1133,12 @@ def test_home_gate_thresholds(scene):
         assert active._untrustworthy_view() is None
 
         tolerance = float(active.get_parameter("scene_home_tolerance").value)
-        active.curr_pos = [SCENE_HOME_POSITION[0] + tolerance * 0.5, 0.0, 0.4]
+        active.curr_pos = list(SCENE_HOME_POSITION)
+        active.curr_pos[0] += tolerance * 0.5
         assert active._untrustworthy_view() is None, "inside tolerance must be trusted"
 
-        active.curr_pos = [SCENE_HOME_POSITION[0] + tolerance * 3.0, 0.0, 0.4]
+        active.curr_pos = list(SCENE_HOME_POSITION)
+        active.curr_pos[0] += tolerance * 3.0
         reason = active._untrustworthy_view()
         assert reason is not None and "from home" in reason
     finally:

@@ -12,14 +12,8 @@ def main():
     # lfd = LfD()
     # lfd.start()
 
-    # set_remote_parameters(lfd,
-    #     [#"crop", "depth",
-    #     "position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"],
-    #     [
-    #     #tf_dict['crop'], tf_dict['depth'],
-    #     0.4, 0.0, 0.4, 1.0, 0.0, 0.0, 0.0],
-    #     server="localizer_node",
-    # )
+    # If this flow moves the arm before recording again, source that target from
+    # panda_control.home_pose.HOME_POSE, as the homing and localization flows do.
 
     # lfd.move_template_start()
 

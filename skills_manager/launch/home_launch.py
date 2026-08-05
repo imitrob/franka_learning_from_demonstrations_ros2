@@ -3,12 +3,19 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
+from panda_control.home_pose import HOME_POSE
 
 
 def generate_launch_description():
-    height_arg = DeclareLaunchArgument('height', default_value='0.4', description='Height parameter')
-    front_offset_arg = DeclareLaunchArgument('front_offset', default_value='0.4', description='Front offset parameter')
-    side_offset_arg = DeclareLaunchArgument('side_offset', default_value='0.0', description='Side offset parameter')
+    height_arg = DeclareLaunchArgument(
+        'height', default_value=str(HOME_POSE.position[2]),
+        description='Height parameter')
+    front_offset_arg = DeclareLaunchArgument(
+        'front_offset', default_value=str(HOME_POSE.position[0]),
+        description='Front offset parameter')
+    side_offset_arg = DeclareLaunchArgument(
+        'side_offset', default_value=str(HOME_POSE.position[1]),
+        description='Side offset parameter')
 
     homing_node = Node(
         package='skills_manager',

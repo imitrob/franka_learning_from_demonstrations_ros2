@@ -6,6 +6,7 @@ from skills_manager.lfd import LfD
 import rclpy
 from skills_manager.ros_param_manager import get_remote_parameter
 from skills_manager.ros_param_manager import set_remote_parameters
+from panda_control.home_pose import HOME_POSE
 
 def main():
     rclpy.init()
@@ -27,8 +28,10 @@ def main():
         print(f"Recording skill: {name_skill}", flush=True)
         print(f"First, localizing: {name_template}", flush=True)
         if move_start_flag:
+            orientation_wxyz = HOME_POSE.orientation_wxyz
             set_remote_parameters(lfd, ["position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"],
-                [0.4, 0.0, 0.4, 1.0, 0.0, 0.0, 0.0], server="localizer_node")
+                [*HOME_POSE.position, *orientation_wxyz[1:], orientation_wxyz[0]],
+                server="localizer_node")
             lfd.home_gripper(); lfd.move_template_start() # I need to always see both robot and gripper moving for sanity check
         lfd.localize(name_template)
         

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from panda_control import SpinPandaNode
+from panda_control.home_pose import HOME_POSE
 from skills_manager.ros_param_manager import get_remote_parameters
 
 def main():
@@ -8,9 +9,9 @@ def main():
     panda=SpinPandaNode()
     panda.start()
 
-    panda.declare_parameter('height', 0.4) # Rewritten for the values from launch file
-    panda.declare_parameter('front_offset', 0.4) # Rewritten for the values from launch file
-    panda.declare_parameter('side_offset', 0.4) # Rewritten for the values from launch file
+    panda.declare_parameter('height', HOME_POSE.position[2])
+    panda.declare_parameter('front_offset', HOME_POSE.position[0])
+    panda.declare_parameter('side_offset', HOME_POSE.position[1])
 
     height = get_remote_parameters(panda, param_names=["height"], server="homing_node")[0]
     front_offset = get_remote_parameters(panda, param_names=["front_offset"], server="homing_node")[0]
