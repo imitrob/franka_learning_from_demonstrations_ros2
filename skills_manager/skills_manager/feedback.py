@@ -81,8 +81,11 @@ class FrankaOnPress():
         '''
 
     def frankabuttons_stop(self):
+        # panda_py's Desk.listen() thread is NOT a daemon, so the process hangs
+        # on exit unless it is joined explicitly.
         if self.frankabuttons_running:
-            print("We don't need to stop frankabuttons")
+            self.desk.stop_listen()
+            self.frankabuttons_running = False
 
     def franka_button_callback(self, event_dict):
         for key in event_dict:

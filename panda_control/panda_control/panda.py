@@ -201,6 +201,18 @@ class Panda():
         goal.header.stamp = self.get_clock().now().to_msg()
 
         self.go_to_pose_ik(goal)
+        self.print_home_error(pos_array, HOME_POSE.orientation_wxyz)
+
+    def print_home_error(self, goal_pos, goal_ori_wxyz):
+        """How far homing actually ended from the home pose. The impedance
+        controller settles wherever its attractor balances gravity and
+        friction, so this is never exactly zero -- print it to see the drift."""
+        pos_err = np.array(self.curr_pos) - np.array(goal_pos)
+        ang_err = q_angle(q_norm(self.curr_ori_wxyz), q_norm(goal_ori_wxyz))
+        print(f"[home] position error: "
+              f"x={pos_err[0]*1000:+.1f} y={pos_err[1]*1000:+.1f} z={pos_err[2]*1000:+.1f} mm "
+              f"(norm {np.linalg.norm(pos_err)*1000:.1f} mm), "
+              f"orientation error: {math.degrees(ang_err):.1f} deg", flush=True)
 
     def stop(self):
         self.goal_position = None

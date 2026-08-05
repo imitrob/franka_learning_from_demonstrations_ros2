@@ -38,6 +38,7 @@ Record the current template for the localization
 ``` bash
 ros2 launch object_localization record_template_launch.py name_template:="new_template"
 ```
+This homes the robot first (default home pose). Pass `homing:="false"` to keep the pose homed above.
 ### Kinesthetic Demonstration 
 
 Be sure that the camera is running using: 
@@ -51,6 +52,7 @@ You can now record a demonstration with:
 ```bash
 ros2 launch skills_manager record_skill_launch.py name_skill:='skill'
 ```
+This homes the robot first. Pass `homing:="false"` to record from wherever the arm already is.
 
 All the trajectories are saved in the folder `trajectory_data/trajectories/` with the name you gave to the skill.
 This folder is a ros package that is used to save and load the demonstrations and save them. We used this folder to have a ligher repository and save all the demonstration in this other one. 

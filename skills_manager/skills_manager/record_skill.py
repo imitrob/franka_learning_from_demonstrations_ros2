@@ -10,8 +10,8 @@ from panda_control.home_pose import HOME_POSE
 
 def main():
     rclpy.init()
+    lfd = LfD()
     try:
-        lfd = LfD()
         lfd.start()
         lfd.keyboard_start()
         lfd.frankabuttons_start()
@@ -39,6 +39,8 @@ def main():
         lfd.save(name_skill)
     except KeyboardInterrupt:
         pass
+    finally:
+        lfd.frankabuttons_stop()
 
     rclpy.shutdown()
 
