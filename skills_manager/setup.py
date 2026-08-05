@@ -24,12 +24,12 @@ setup(
     entry_points={
         'console_scripts': [
             "home = skills_manager.home:main",
+            "lfd_server = skills_manager.lfd_server:main",
             "record_skill = skills_manager.record_skill:main",
             "play_skill = skills_manager.play_skill:main",
         ],
     },
 )
-
 
 
 

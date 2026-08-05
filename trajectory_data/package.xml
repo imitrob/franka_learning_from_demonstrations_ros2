@@ -9,6 +9,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclpy</depend>
   <depend>pynput</depend>
+  <exec_depend>python3-numpy</exec_depend>
   <export>
     <build_type>ament_python</build_type>
   </export>

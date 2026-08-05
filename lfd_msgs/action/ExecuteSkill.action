@@ -1,0 +1,14 @@
+# Canonical SkillCommand JSON (action, objects, parameters, command).
+string skill_command_json
+---
+# ROS action status carries succeeded/canceled/aborted; this explains it.
+string message
+# Parts that reached the end of trajectory playback, in execution order.
+string[] completed_parts
+---
+string phase
+# One-based while a part is active; zero during task-level phases.
+uint32 part_index
+uint32 part_count
+string skill_name
+float32 part_progress

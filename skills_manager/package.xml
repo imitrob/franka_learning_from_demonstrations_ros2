@@ -12,7 +12,12 @@
   <build_depend>rclpy</build_depend>
   <build_export_depend>rclpy</build_export_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>lfd_msgs</exec_depend>
+  <exec_depend>multi_modal_reasoning</exec_depend>
   <exec_depend>panda_control</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>trajectory_data</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

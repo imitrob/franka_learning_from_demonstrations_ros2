@@ -23,15 +23,17 @@ find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/ExecuteSkill.action"
   "srv/ComputeLocalization.srv"
   "srv/SetTemplate.srv"
   "srv/StringService.srv"
   "srv/GetScene.srv"
   
-  DEPENDENCIES builtin_interfaces std_msgs sensor_msgs geometry_msgs
+  DEPENDENCIES action_msgs builtin_interfaces std_msgs sensor_msgs geometry_msgs
 )
 
 if(BUILD_TESTING)
