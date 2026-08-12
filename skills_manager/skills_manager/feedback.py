@@ -14,11 +14,13 @@ from nocode_robot_programming.gestures import TeleoperationByDrawing
 import threading
 
 BUTTON_PRESS_MODE = "momentary"
+FRANKA_BUTTON_LISTEN_TIMEOUT = 0.1
 
 class KeyboardConnector():
     def __init__(self):
         super(KeyboardConnector, self).__init__()
         self.key_thr_running = False
+        self.keyboard_listener = None
     
     def keyboard_start(self):
         if not self.key_thr_running:
@@ -33,8 +35,9 @@ class KeyboardConnector():
 
     def keyboard_stop(self):
         if self.key_thr_running:
+            if self.keyboard_listener is not None:
+                self.keyboard_listener.stop()
             self.key_thr.join(timeout=1)
-            self.keyboard_listener.stop()
             self.key_thr_running = False
     
 
@@ -75,7 +78,14 @@ class FrankaOnPress():
     def frankabuttons_start(self):
         if not self.frankabuttons_running:
             self.frankabuttons_running = True
-            self.desk.listen(self.franka_button_callback)
+            # Desk.listen() hard-codes a one-second websocket receive timeout.
+            # Starting the same PandaPy listener with a shorter timeout keeps
+            # stop_listen(), and therefore action completion, responsive.
+            self.desk._listen_thread = threading.Thread(
+                target=self.desk._listen,
+                args=(self.franka_button_callback, FRANKA_BUTTON_LISTEN_TIMEOUT),
+            )
+            self.desk._listen_thread.start()
         '''
         {'check': False, 'circle': False, 'cross': False, 'down': False, 'left': False, 'right': False, 'up': False}
         '''
@@ -257,10 +267,13 @@ class Feedback(FrankaConnector, KeyboardConnector, JoystickConnector, Teleoperat
     def keyboard_on_release(self, key):
         pass
 
-    ## I must find better solution how to get the robot handle
     @property
     def _robot(self):
-        if self.__class__.__name__ == "LfD" or self.__class__.__name__ == "RALfD":
+        # Feedback is mixed directly into LfD, RALfD and LfDServer. Detect the
+        # robot by what it can do instead of by its concrete class name.
+        if all(hasattr(self, attribute) for attribute in (
+            "gripper_state", "grasp_gripper", "move_gripper"
+        )):
             return self
         elif hasattr(self, "LfD") and self.LfD is not None:
             return self.LfD

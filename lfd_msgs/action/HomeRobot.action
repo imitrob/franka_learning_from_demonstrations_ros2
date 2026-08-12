@@ -1,0 +1,8 @@
+# Resolve these values in the client; HOME_POSE remains the default there.
+float64 height
+float64 front_offset
+float64 side_offset
+---
+string message
+---
+string phase

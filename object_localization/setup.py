@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import find_packages, setup
 from glob import glob
 import os 
 
@@ -7,7 +7,7 @@ package_name = 'object_localization'
 setup(
     name=package_name,
     version='0.0.1',
-    packages=[package_name],
+    packages=find_packages(),
     install_requires=['setuptools'],
     data_files=[
         ('share/' + package_name, ['package.xml']),
@@ -28,6 +28,7 @@ setup(
         'console_scripts': [
             "static_transform_camera = object_localization.static_transform_camera:main",
             "record_template = object_localization.record_template:main",
+            "template_recorder_server = object_localization.template_recorder_server:main",
             "localizer_service = object_localization.localizer_service:main",
             "active_localizer = object_localization.active_localizer:main",
         ],

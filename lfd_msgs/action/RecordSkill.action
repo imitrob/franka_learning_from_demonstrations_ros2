@@ -1,0 +1,11 @@
+string skill_name
+# Empty means derive the object template from skill_name.
+string template_name
+bool home_before_recording
+bool overwrite_existing
+---
+string message
+string saved_path
+---
+string phase
+string recording_id

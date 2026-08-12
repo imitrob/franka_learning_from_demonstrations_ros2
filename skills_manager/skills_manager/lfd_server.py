@@ -1,44 +1,70 @@
 #!/usr/bin/env python3
-"""Persistent ROS action server for executing HRI SkillCommand tasks."""
+"""Persistent single-owner server for every operation that moves Panda."""
+import math
 import queue
 import threading
 import time
+import uuid
 
 import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus
 from action_msgs.srv import CancelGoal
-from lfd_msgs.action import ExecuteSkill
-from lfd_msgs.srv import SetTemplate
+from lfd_msgs.action import ExecuteSkill, HomeRobot, RecordSkill, ReserveRobot
+from lfd_msgs.msg import OperationStatus
+from lfd_msgs.srv import (
+    FinishRecording,
+    Heartbeat,
+    ReleaseReservation,
+    SetTemplate,
+)
 from multi_modal_reasoning.skill_command import SkillCommand
 from panda_control.home_pose import HOME_POSE
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
+from rclpy.duration import Duration
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from trajectory_data.skill_part import SkillPart
 
 from skills_manager.lfd import LfD
 
 
-ACTION_NAME = "/lfd/execute_skill"
+EXECUTE_ACTION = "/lfd/execute_skill"
+HOME_ACTION = "/lfd/home_robot"
+RECORD_ACTION = "/lfd/record_skill"
+RESERVE_ACTION = "/lfd/reserve_robot"
+STATUS_TOPIC = "/lfd/operation_status"
 SKILL_COMMAND_TOPIC = "/hri/skill_command"
 STOP_ACTION = "stop"
 HOME_TOLERANCE = 0.05
 HOME_ORIENTATION_TOLERANCE = 0.1
+RECORD_HEARTBEAT_TIMEOUT = 30.0
+LEASE_TIMEOUT = 30.0
 
 
-class _TaskCanceled(Exception):
+class _OperationCanceled(Exception):
+    pass
+
+
+class _OperationTimedOut(Exception):
     pass
 
 
 class LfDServer(LfD):
-    """Own one Panda and execute at most one multi-part LfD task at a time."""
+    """Own one Panda and admit exactly one robot operation at a time."""
 
     def __init__(self):
         super().__init__()
 
         self._state_lock = threading.Lock()
-        self._task_busy = False
+        self._operation_mode = OperationStatus.IDLE
+        self._operation_id = ""
+        self._operation_target = ""
+        self._operation_phase = "idle"
+        self._operation_message = ""
         self._active_goal = None
+        self._active_action_name = ""
+
         self._stop_inflight = 0
         self._deferred_stop_goals = []
         self._stop_errors = {}
@@ -47,31 +73,115 @@ class LfDServer(LfD):
         self._cancel_sent = False
         self._cancel_error = ""
 
-        # Tk widgets were created on the main thread by LfD. Executor workers
-        # enqueue state changes; main() applies them on Tk's owning thread.
+        self._record_finish = threading.Event()
+        self._recording_id = ""
+        self._record_deadline = 0.0
+        self._record_timed_out = False
+        self._lease_released = threading.Event()
+        self._lease_id = ""
+        self._lease_deadline = 0.0
+
+        # Tk widgets belong to main(); executor workers only enqueue changes.
         self._signalizer_states = queue.SimpleQueue()
 
         self.declare_parameter("home_tolerance", HOME_TOLERANCE)
         self.declare_parameter(
             "home_orientation_tolerance", HOME_ORIENTATION_TOLERANCE
         )
+        self.declare_parameter(
+            "record_heartbeat_timeout", RECORD_HEARTBEAT_TIMEOUT
+        )
+        self.declare_parameter("template_lease_timeout", LEASE_TIMEOUT)
 
-        self._action_server = ActionServer(
+        status_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._status_pub = self.create_publisher(
+            OperationStatus, STATUS_TOPIC, status_qos
+        )
+
+        self._execute_server = ActionServer(
             self,
             ExecuteSkill,
-            ACTION_NAME,
+            EXECUTE_ACTION,
             execute_callback=self._execute_callback,
-            goal_callback=self._goal_callback,
-            handle_accepted_callback=self._handle_accepted_callback,
+            goal_callback=self._execute_goal_callback,
+            handle_accepted_callback=self._execute_accepted_callback,
             cancel_callback=self._cancel_callback,
             callback_group=self.callback_group,
         )
-        self._action_client = ActionClient(
-            self, ExecuteSkill, ACTION_NAME, callback_group=self.callback_group
+        self._home_server = ActionServer(
+            self,
+            HomeRobot,
+            HOME_ACTION,
+            execute_callback=self._home_callback,
+            goal_callback=self._home_goal_callback,
+            handle_accepted_callback=lambda goal: self._operation_accepted(
+                goal, HOME_ACTION
+            ),
+            cancel_callback=self._cancel_callback,
+            callback_group=self.callback_group,
         )
-        self._cancel_client = self.create_client(
-            CancelGoal,
-            f"{ACTION_NAME}/_action/cancel_goal",
+        self._record_server = ActionServer(
+            self,
+            RecordSkill,
+            RECORD_ACTION,
+            execute_callback=self._record_callback,
+            goal_callback=self._record_goal_callback,
+            handle_accepted_callback=lambda goal: self._operation_accepted(
+                goal, RECORD_ACTION
+            ),
+            cancel_callback=self._cancel_callback,
+            callback_group=self.callback_group,
+        )
+        self._reserve_server = ActionServer(
+            self,
+            ReserveRobot,
+            RESERVE_ACTION,
+            execute_callback=self._reserve_callback,
+            goal_callback=self._reserve_goal_callback,
+            handle_accepted_callback=lambda goal: self._operation_accepted(
+                goal, RESERVE_ACTION
+            ),
+            cancel_callback=self._cancel_callback,
+            callback_group=self.callback_group,
+        )
+
+        self._execute_client = ActionClient(
+            self, ExecuteSkill, EXECUTE_ACTION, callback_group=self.callback_group
+        )
+        self._cancel_clients = {
+            name: self.create_client(
+                CancelGoal,
+                f"{name}/_action/cancel_goal",
+                callback_group=self.callback_group,
+            )
+            for name in (EXECUTE_ACTION, HOME_ACTION, RECORD_ACTION, RESERVE_ACTION)
+        }
+        self.create_service(
+            FinishRecording,
+            f"{RECORD_ACTION}/finish",
+            self._finish_recording_callback,
+            callback_group=self.callback_group,
+        )
+        self.create_service(
+            Heartbeat,
+            f"{RECORD_ACTION}/heartbeat",
+            self._record_heartbeat_callback,
+            callback_group=self.callback_group,
+        )
+        self.create_service(
+            Heartbeat,
+            f"{RESERVE_ACTION}/heartbeat",
+            self._lease_heartbeat_callback,
+            callback_group=self.callback_group,
+        )
+        self.create_service(
+            ReleaseReservation,
+            f"{RESERVE_ACTION}/release",
+            self._release_reservation_callback,
             callback_group=self.callback_group,
         )
         self.create_subscription(
@@ -81,10 +191,118 @@ class LfDServer(LfD):
             10,
             callback_group=self.callback_group,
         )
+        self._publish_operation_status()
 
-    # --- admission and ROS transport -------------------------------------
+    # --- shared admission/state -----------------------------------------
 
-    def _goal_callback(self, request):
+    def _reserve_operation(self, mode, target, action_name):
+        with self._state_lock:
+            if self._operation_mode != OperationStatus.IDLE or self._stop_inflight:
+                self.get_logger().warning(
+                    f"Rejecting {target!r}: robot operation is already active"
+                )
+                return GoalResponse.REJECT
+            self._operation_mode = mode
+            self._operation_id = uuid.uuid4().hex
+            self._operation_target = target
+            self._operation_phase = "accepted"
+            self._operation_message = ""
+            self._active_goal = None
+            self._active_action_name = action_name
+            self._cancel_sent = False
+            self._cancel_error = ""
+            if mode == OperationStatus.RECORDING_SKILL:
+                self._recording_id = self._operation_id
+                self._record_deadline = (
+                    time.monotonic()
+                    + float(self.get_parameter("record_heartbeat_timeout").value)
+                )
+                self._record_finish.clear()
+                self._record_timed_out = False
+            elif mode == OperationStatus.CAPTURING_TEMPLATE:
+                self._lease_id = self._operation_id
+                self._lease_deadline = 0.0
+                self._lease_released.clear()
+        self._publish_operation_status()
+        return GoalResponse.ACCEPT
+
+    def _operation_accepted(self, goal_handle, action_name):
+        with self._state_lock:
+            self._active_goal = goal_handle
+            self._active_action_name = action_name
+            stop_is_waiting = self._stop_inflight > 0
+        goal_handle.execute()
+        if stop_is_waiting:
+            self._request_active_cancel()
+
+    def _cancel_callback(self, goal_handle):
+        if hasattr(goal_handle.request, "skill_command_json"):
+            try:
+                if self._task_from_request(goal_handle.request).action == STOP_ACTION:
+                    return CancelResponse.REJECT
+            except ValueError:
+                return CancelResponse.REJECT
+        with self._state_lock:
+            if self._operation_mode == OperationStatus.IDLE:
+                return CancelResponse.REJECT
+            if self._active_goal is None:
+                self._active_goal = goal_handle
+            elif self._active_goal is not goal_handle:
+                return CancelResponse.REJECT
+        try:
+            self.stop()
+            self.stop_gripper()
+        except Exception as exc:
+            self.get_logger().warning(f"Could not stop canceled motion: {exc}")
+        return CancelResponse.ACCEPT
+
+    def _set_operation_phase(self, phase, message=""):
+        with self._state_lock:
+            self._operation_phase = phase
+            self._operation_message = message
+        self._publish_operation_status()
+
+    def _publish_operation_status(self):
+        if not hasattr(self, "_status_pub"):
+            return
+        with self._state_lock:
+            message = OperationStatus()
+            message.mode = self._operation_mode
+            message.operation_id = self._operation_id
+            message.target = self._operation_target
+            message.phase = self._operation_phase
+            message.message = self._operation_message
+        self._status_pub.publish(message)
+
+    def _finish_operation(self, cleanup_error="", outcome="completed"):
+        with self._state_lock:
+            stop_error = cleanup_error or self._cancel_error
+            deferred = list(self._deferred_stop_goals)
+            self._deferred_stop_goals.clear()
+            for stop_goal in deferred:
+                stop_id = self._goal_id(stop_goal)
+                self._stop_errors[stop_id] = stop_error
+                self._stop_outcomes[stop_id] = outcome
+            self._operation_mode = OperationStatus.IDLE
+            self._operation_id = ""
+            self._operation_target = ""
+            self._operation_phase = "idle"
+            self._operation_message = ""
+            self._active_goal = None
+            self._active_action_name = ""
+            self._recording_id = ""
+            self._record_deadline = 0.0
+            self._lease_id = ""
+            self._lease_deadline = 0.0
+            self._cancel_sent = False
+            self._cancel_error = ""
+        self._publish_operation_status()
+        for stop_goal in deferred:
+            stop_goal.execute()
+
+    # --- ExecuteSkill and global stop -----------------------------------
+
+    def _execute_goal_callback(self, request):
         try:
             task = self._task_from_request(request)
             self._validate_supported_task(task)
@@ -92,65 +310,33 @@ class LfDServer(LfD):
             self.get_logger().warning(f"Rejecting skill task: {exc}")
             return GoalResponse.REJECT
 
-        with self._state_lock:
-            if task.action == STOP_ACTION:
-                self._stop_inflight += 1
-                return GoalResponse.ACCEPT
-            if self._task_busy or self._stop_inflight:
-                self.get_logger().warning(
-                    f"Rejecting {task.command!r}: another task or stop is active"
-                )
-                return GoalResponse.REJECT
-
-            # Reserve before returning. Otherwise two goal callbacks can both
-            # accept before either handle reaches _handle_accepted_callback.
-            self._task_busy = True
-            self._active_goal = None
-            self._cancel_sent = False
-            self._cancel_error = ""
-        return GoalResponse.ACCEPT
-
-    def _handle_accepted_callback(self, goal_handle):
-        task = self._task_from_request(goal_handle.request)
         if task.action == STOP_ACTION:
-            execute_now = False
-            request_cancel = False
             with self._state_lock:
-                if self._task_busy:
-                    self._deferred_stop_goals.append(goal_handle)
-                    self._deferred_stop_ids.add(self._goal_id(goal_handle))
-                    request_cancel = self._active_goal is not None
-                else:
-                    execute_now = True
-            if request_cancel:
-                self._request_active_cancel()
-            if execute_now:
-                goal_handle.execute()
+                self._stop_inflight += 1
+            return GoalResponse.ACCEPT
+        return self._reserve_operation(
+            OperationStatus.EXECUTING, task.command, EXECUTE_ACTION
+        )
+
+    def _execute_accepted_callback(self, goal_handle):
+        task = self._task_from_request(goal_handle.request)
+        if task.action != STOP_ACTION:
+            self._operation_accepted(goal_handle, EXECUTE_ACTION)
             return
 
+        execute_now = False
+        request_cancel = False
         with self._state_lock:
-            self._active_goal = goal_handle
-            stop_is_waiting = self._stop_inflight > 0
-        goal_handle.execute()
-        if stop_is_waiting:
+            if self._operation_mode != OperationStatus.IDLE:
+                self._deferred_stop_goals.append(goal_handle)
+                self._deferred_stop_ids.add(self._goal_id(goal_handle))
+                request_cancel = self._active_goal is not None
+            else:
+                execute_now = True
+        if request_cancel:
             self._request_active_cancel()
-
-    def _cancel_callback(self, goal_handle):
-        try:
-            task = self._task_from_request(goal_handle.request)
-        except ValueError:
-            return CancelResponse.REJECT
-        if task.action == STOP_ACTION:
-            return CancelResponse.REJECT
-
-        with self._state_lock:
-            if not self._task_busy:
-                return CancelResponse.REJECT
-            if self._active_goal is None:
-                self._active_goal = goal_handle
-            elif self._active_goal is not goal_handle:
-                return CancelResponse.REJECT
-        return CancelResponse.ACCEPT
+        if execute_now:
+            goal_handle.execute()
 
     def _execute_callback(self, goal_handle):
         task = self._task_from_request(goal_handle.request)
@@ -158,13 +344,13 @@ class LfDServer(LfD):
             return self._execute_stop(goal_handle)
         return self._execute_task(goal_handle, task)
 
-    def _skill_command_callback(self, message: String):
+    def _skill_command_callback(self, message):
         goal = ExecuteSkill.Goal()
         goal.skill_command_json = message.data
         try:
-            future = self._action_client.send_goal_async(goal)
+            future = self._execute_client.send_goal_async(goal)
             future.add_done_callback(self._topic_goal_response)
-        except Exception as exc:  # action transport can fail during shutdown
+        except Exception as exc:
             self.get_logger().error(f"Could not forward skill command: {exc}")
 
     def _topic_goal_response(self, future):
@@ -185,16 +371,14 @@ class LfDServer(LfD):
         except Exception as exc:
             self.get_logger().error(f"Skill command result failed: {exc}")
             return
-        if wrapped.status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info(wrapped.result.message)
-        elif wrapped.status == GoalStatus.STATUS_CANCELED:
-            self.get_logger().warning(wrapped.result.message)
-        else:
-            self.get_logger().error(wrapped.result.message)
+        log = self.get_logger().info
+        if wrapped.status == GoalStatus.STATUS_CANCELED:
+            log = self.get_logger().warning
+        elif wrapped.status != GoalStatus.STATUS_SUCCEEDED:
+            log = self.get_logger().error
+        log(wrapped.result.message)
 
-    # --- task execution ---------------------------------------------------
-
-    def _execute_task(self, goal_handle, task: SkillCommand):
+    def _execute_task(self, goal_handle, task):
         parts = self.parts_for_task(task)
         completed = []
         task_error = ""
@@ -202,46 +386,54 @@ class LfDServer(LfD):
         cleanup_error = ""
         terminal_outcome = "failed"
 
+        self.end = False
+        self._start_inputs()
         self._queue_signalizer("executing")
         try:
+            self._set_operation_phase("homing")
             self._publish_feedback(goal_handle, "homing", parts)
             self._release_home()
             self._raise_if_canceled(goal_handle)
 
+            self._set_operation_phase("validating")
             self._validate_parts(goal_handle, parts)
             self._raise_if_canceled(goal_handle)
 
             for index, part in enumerate(parts, start=1):
                 if index > 1:
+                    self._set_operation_phase("homing")
                     self._publish_feedback(
                         goal_handle, "homing", parts, index=index, part=part
                     )
                     self._carry_home()
                     self._raise_if_canceled(goal_handle)
 
+                self._set_operation_phase("localizing", part.name)
                 self._publish_feedback(
                     goal_handle, "localizing", parts, index=index, part=part
                 )
                 self._localize_part(part)
                 self._raise_if_canceled(goal_handle)
 
+                self._set_operation_phase("executing", part.name)
                 self._execute_part(goal_handle, parts, index, part)
                 completed.append(part.name)
                 self._raise_if_canceled(goal_handle)
-        except _TaskCanceled as exc:
+        except _OperationCanceled as exc:
             canceled = True
             task_error = str(exc)
-        except Exception as exc:  # all accepted tasks finish through release-home
+        except Exception as exc:
             task_error = str(exc)
             self.get_logger().error(f"Skill task failed: {exc}")
         finally:
             try:
+                self._set_operation_phase("homing")
                 self._publish_feedback(goal_handle, "homing", parts)
                 self._release_home()
             except Exception as exc:
                 cleanup_error = str(exc)
                 self.get_logger().error(f"Release-home failed: {exc}")
-
+            self._stop_inputs()
             canceled = canceled or goal_handle.is_cancel_requested
             self._publish_feedback(
                 goal_handle, "idle", parts, progress=1.0 if not task_error else 0.0
@@ -256,7 +448,7 @@ class LfDServer(LfD):
                     task, f"cleanup failed: {cleanup_error}", completed
                 )
                 goal_handle.abort()
-            elif canceled or goal_handle.is_cancel_requested:
+            elif canceled:
                 result.message = self._result_message(
                     task, task_error or "canceled", completed
                 )
@@ -271,16 +463,13 @@ class LfDServer(LfD):
                     goal_handle.succeed()
                     terminal_outcome = "completed"
                 except Exception:
-                    # A cancel can be accepted after the check above but before
-                    # the success transition. Complete that legal transition
-                    # as canceled instead of leaking an action state error.
                     if not goal_handle.is_cancel_requested:
                         raise
                     result.message = self._result_message(task, "canceled", completed)
                     goal_handle.canceled()
                     terminal_outcome = "canceled"
         finally:
-            self._finish_active_task(cleanup_error, terminal_outcome)
+            self._finish_operation(cleanup_error, terminal_outcome)
         return result
 
     def _execute_stop(self, goal_handle):
@@ -299,39 +488,341 @@ class LfDServer(LfD):
                 result.message = f"Stop completed with an error: {error}"
                 goal_handle.abort()
             else:
-                if not waited:
-                    result.message = "No active task; stop is a no-op"
-                elif outcome == "canceled":
-                    result.message = "Active task canceled and robot homed"
-                else:
-                    result.message = (
-                        f"Active task {outcome or 'ended'} before cancellation; "
-                        "robot homed"
-                    )
+                result.message = (
+                    "No active operation; stop is a no-op"
+                    if not waited
+                    else f"Active operation {outcome or 'ended'}"
+                )
                 goal_handle.succeed()
         finally:
             with self._state_lock:
                 self._stop_inflight -= 1
         return result
 
+    # --- HomeRobot -------------------------------------------------------
+
+    def _home_goal_callback(self, request):
+        values = (request.height, request.front_offset, request.side_offset)
+        if not all(math.isfinite(value) for value in values):
+            return GoalResponse.REJECT
+        return self._reserve_operation(
+            OperationStatus.HOMING, "home", HOME_ACTION
+        )
+
+    def _home_callback(self, goal_handle):
+        result = HomeRobot.Result()
+        outcome = "failed"
+        error = ""
+        try:
+            self._set_operation_phase("homing")
+            feedback = HomeRobot.Feedback()
+            feedback.phase = "homing"
+            goal_handle.publish_feedback(feedback)
+            request = goal_handle.request
+            self.home(
+                height=request.height,
+                front_offset=request.front_offset,
+                side_offset=request.side_offset,
+            )
+            self.offset_compensator(20)
+            self._raise_if_canceled(goal_handle)
+            result.message = "Robot homed"
+            goal_handle.succeed()
+            outcome = "completed"
+        except _OperationCanceled:
+            result.message = "Homing canceled"
+            goal_handle.canceled()
+            outcome = "canceled"
+        except Exception as exc:
+            error = str(exc)
+            result.message = f"Homing failed: {exc}"
+            goal_handle.abort()
+        finally:
+            self._queue_signalizer("idle")
+            self._finish_operation(error, outcome)
+        return result
+
+    # --- RecordSkill -----------------------------------------------------
+
+    @staticmethod
+    def _recording_part(request):
+        raw = request.skill_name.strip()
+        part = SkillPart(raw)
+        if not raw or part.name != raw.removesuffix(".npz"):
+            raise ValueError("invalid skill name")
+        if part.is_variant or not part.action or not part.object:
+            raise ValueError("skill name must be <action>__<object>")
+        return part
+
+    def _record_goal_callback(self, request):
+        try:
+            part = self._recording_part(request)
+            if part.archive_path() and not request.overwrite_existing:
+                try:
+                    part.validate_archive()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ValueError(f"skill {part.name!r} already exists")
+        except ValueError as exc:
+            self.get_logger().warning(f"Rejecting recording: {exc}")
+            return GoalResponse.REJECT
+        return self._reserve_operation(
+            OperationStatus.RECORDING_SKILL, part.name, RECORD_ACTION
+        )
+
+    def _record_callback(self, goal_handle):
+        result = RecordSkill.Result()
+        part = self._recording_part(goal_handle.request)
+        template = goal_handle.request.template_name.strip() or part.object
+        outcome = "failed"
+        error = ""
+        saved = ""
+
+        self.end = False
+        self._start_inputs()
+        try:
+            self._record_feedback(goal_handle, "homing")
+            if goal_handle.request.home_before_recording:
+                self.home()
+                self.offset_compensator(20)
+            self._raise_record_stop(goal_handle)
+            if self._record_finish_requested():
+                outcome = "completed"
+                return self._finish_recording_early(goal_handle, result)
+
+            self._record_feedback(goal_handle, "localizing")
+            self._validate_template(template)
+            if self.localize(template) is False:
+                raise RuntimeError(f"localization failed for {template!r}")
+            self._raise_record_stop(goal_handle)
+            if self._record_finish_requested():
+                outcome = "completed"
+                return self._finish_recording_early(goal_handle, result)
+
+            started = self.traj_rec(
+                should_stop=lambda: self._record_should_stop(goal_handle),
+                on_phase=lambda phase: self._record_phase(goal_handle, phase),
+                signalize=False,
+            )
+            self._raise_record_stop(goal_handle)
+            if not started:
+                outcome = "completed"
+                return self._finish_recording_early(goal_handle, result)
+
+            self._record_feedback(goal_handle, "saving")
+            self.save(part.name, overwrite=goal_handle.request.overwrite_existing)
+            saved = part.archive_path()
+            result.message = f"Recorded {part.name!r}"
+            result.saved_path = saved
+            goal_handle.succeed()
+            outcome = "completed"
+            return result
+        except _OperationCanceled:
+            result.message = "Recording canceled; demonstration discarded"
+            goal_handle.canceled()
+            outcome = "canceled"
+        except _OperationTimedOut:
+            result.message = "Recording client heartbeat timed out; discarded"
+            goal_handle.abort()
+        except Exception as exc:
+            error = str(exc)
+            result.message = f"Recording failed: {exc}"
+            goal_handle.abort()
+        finally:
+            self._stop_inputs()
+            self._restore_normal_stiffness()
+            self._queue_signalizer("idle")
+            self._finish_operation(error, outcome)
+        return result
+
+    def _finish_recording_early(self, goal_handle, result):
+        result.message = "Recording ended before a demonstration started; nothing saved"
+        result.saved_path = ""
+        goal_handle.succeed()
+        return result
+
+    def _record_phase(self, goal_handle, phase):
+        self._queue_signalizer("ready" if phase == "ready" else "recording")
+        self._record_feedback(goal_handle, phase)
+
+    def _record_feedback(self, goal_handle, phase):
+        self._set_operation_phase(phase)
+        feedback = RecordSkill.Feedback()
+        feedback.phase = phase
+        feedback.recording_id = self._recording_id
+        if goal_handle.is_active:
+            goal_handle.publish_feedback(feedback)
+
+    def _record_finish_requested(self):
+        return self.end or self._record_finish.is_set()
+
+    def _record_should_stop(self, goal_handle):
+        if goal_handle.is_cancel_requested or not rclpy.ok():
+            return True
+        if self._record_finish_requested():
+            return True
+        with self._state_lock:
+            timed_out = time.monotonic() > self._record_deadline
+            self._record_timed_out = self._record_timed_out or timed_out
+        return timed_out
+
+    def _raise_record_stop(self, goal_handle):
+        if goal_handle.is_cancel_requested or not rclpy.ok():
+            raise _OperationCanceled("canceled")
+        with self._state_lock:
+            timed_out = self._record_timed_out or (
+                self._record_deadline and time.monotonic() > self._record_deadline
+            )
+            self._record_timed_out = bool(timed_out)
+        if timed_out:
+            raise _OperationTimedOut()
+
+    def _finish_recording_callback(self, request, response):
+        with self._state_lock:
+            valid = (
+                self._operation_mode == OperationStatus.RECORDING_SKILL
+                and request.recording_id == self._recording_id
+            )
+        if valid:
+            self._record_finish.set()
+            self.end = True
+        response.success = valid
+        response.message = "finish requested" if valid else "recording is not active"
+        return response
+
+    def _record_heartbeat_callback(self, request, response):
+        with self._state_lock:
+            valid = (
+                self._operation_mode == OperationStatus.RECORDING_SKILL
+                and request.session_id == self._recording_id
+            )
+            if valid:
+                self._record_deadline = (
+                    time.monotonic()
+                    + float(self.get_parameter("record_heartbeat_timeout").value)
+                )
+        response.success = valid
+        response.message = "renewed" if valid else "recording is not active"
+        return response
+
+    # --- camera-agnostic template reservation --------------------------
+
+    def _reserve_goal_callback(self, request):
+        requester = request.requester.strip()
+        if not requester:
+            return GoalResponse.REJECT
+        return self._reserve_operation(
+            OperationStatus.CAPTURING_TEMPLATE, requester, RESERVE_ACTION
+        )
+
+    def _reserve_callback(self, goal_handle):
+        result = ReserveRobot.Result()
+        outcome = "failed"
+        error = ""
+        try:
+            self._reserve_feedback(goal_handle, "homing")
+            self.home()
+            self.offset_compensator(20)
+            self._raise_if_canceled(goal_handle)
+
+            with self._state_lock:
+                self._lease_deadline = (
+                    time.monotonic()
+                    + float(self.get_parameter("template_lease_timeout").value)
+                )
+            self._reserve_feedback(goal_handle, "ready")
+            while rclpy.ok() and not self._lease_released.wait(0.1):
+                self._raise_if_canceled(goal_handle)
+                with self._state_lock:
+                    expired = time.monotonic() > self._lease_deadline
+                if expired:
+                    raise _OperationTimedOut()
+
+            self._raise_if_canceled(goal_handle)
+            result.message = "Template reservation released"
+            goal_handle.succeed()
+            outcome = "completed"
+        except _OperationCanceled:
+            result.message = "Template reservation canceled"
+            goal_handle.canceled()
+            outcome = "canceled"
+        except _OperationTimedOut:
+            result.message = "Template reservation timed out"
+            goal_handle.abort()
+            outcome = "timed_out"
+        except Exception as exc:
+            error = str(exc)
+            result.message = f"Template reservation failed: {exc}"
+            goal_handle.abort()
+        finally:
+            self._queue_signalizer("idle")
+            self._finish_operation(error, outcome)
+        return result
+
+    def _reserve_feedback(self, goal_handle, phase):
+        self._set_operation_phase(phase)
+        feedback = ReserveRobot.Feedback()
+        feedback.phase = phase
+        feedback.lease_id = self._lease_id
+        with self._state_lock:
+            remaining = max(0.0, self._lease_deadline - time.monotonic())
+        feedback.expires_at = (
+            self.get_clock().now() + Duration(seconds=remaining)
+        ).to_msg()
+        if goal_handle.is_active:
+            goal_handle.publish_feedback(feedback)
+
+    def _lease_heartbeat_callback(self, request, response):
+        with self._state_lock:
+            valid = (
+                self._operation_mode == OperationStatus.CAPTURING_TEMPLATE
+                and request.session_id == self._lease_id
+                and self._lease_deadline > 0.0
+            )
+            if valid:
+                self._lease_deadline = (
+                    time.monotonic()
+                    + float(self.get_parameter("template_lease_timeout").value)
+                )
+        response.success = valid
+        response.message = "renewed" if valid else "reservation is not ready"
+        return response
+
+    def _release_reservation_callback(self, request, response):
+        with self._state_lock:
+            valid = (
+                self._operation_mode == OperationStatus.CAPTURING_TEMPLATE
+                and request.lease_id == self._lease_id
+            )
+        if valid:
+            self._lease_released.set()
+        response.success = valid
+        response.message = "released" if valid else "reservation is not active"
+        return response
+
+    # --- shared robot helpers -------------------------------------------
+
     def _validate_parts(self, goal_handle, parts):
         self._publish_feedback(goal_handle, "validating", parts)
-        if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
-            raise RuntimeError("set_localizer service is unavailable")
-
         for index, part in enumerate(parts, start=1):
             self._raise_if_canceled(goal_handle)
             self._publish_feedback(
                 goal_handle, "validating", parts, index=index, part=part
             )
             part.validate_archive()
-            response = self.set_localizer_client.call(
-                SetTemplate.Request(template_name=part.object)
-            )
-            if response is None or not response.success:
-                raise ValueError(f"localization template {part.object!r} is unavailable")
+            self._validate_template(part.object)
 
-    def _localize_part(self, part: SkillPart):
+    def _validate_template(self, template):
+        if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
+            raise RuntimeError("set_localizer service is unavailable")
+        response = self.set_localizer_client.call(
+            SetTemplate.Request(template_name=template)
+        )
+        if response is None or not response.success:
+            raise ValueError(f"localization template {template!r} is unavailable")
+
+    def _localize_part(self, part):
         if self.localize(part.object) is False:
             raise RuntimeError(f"localization failed for {part.object!r}")
 
@@ -353,10 +844,8 @@ class LfDServer(LfD):
                 progress=self.time_phase,
             )
 
-    # --- task policy helpers ---------------------------------------------
-
     @staticmethod
-    def parts_for_task(task: SkillCommand) -> list[SkillPart]:
+    def parts_for_task(task):
         if len(task.objects) == 1:
             return [SkillPart(f"{task.action}{SkillPart.SEP}{task.objects[0]}")]
         return [
@@ -365,7 +854,7 @@ class LfDServer(LfD):
         ]
 
     @staticmethod
-    def _validate_supported_task(task: SkillCommand):
+    def _validate_supported_task(task):
         if not task.action.strip():
             raise ValueError("action is empty")
         if task.parameters:
@@ -380,7 +869,7 @@ class LfDServer(LfD):
             raise ValueError("object names cannot be empty")
 
     @staticmethod
-    def _task_from_request(request) -> SkillCommand:
+    def _task_from_request(request):
         return SkillCommand.from_json(request.skill_command_json)
 
     def _raise_if_canceled(self, goal_handle):
@@ -390,9 +879,9 @@ class LfDServer(LfD):
             self.stop()
             self.stop_gripper()
         finally:
-            raise _TaskCanceled("canceled")
+            raise _OperationCanceled("canceled")
 
-    def _is_home(self) -> bool:
+    def _is_home(self):
         position_tolerance = float(self.get_parameter("home_tolerance").value)
         orientation_tolerance = float(
             self.get_parameter("home_orientation_tolerance").value
@@ -403,10 +892,7 @@ class LfDServer(LfD):
         current /= np.linalg.norm(current)
         target /= np.linalg.norm(target)
         angle = 2.0 * np.arccos(np.clip(abs(np.dot(current, target)), 0.0, 1.0))
-        return (
-            float(distance) <= position_tolerance
-            and float(angle) <= orientation_tolerance
-        )
+        return distance <= position_tolerance and angle <= orientation_tolerance
 
     def _release_home(self):
         self.open()
@@ -417,7 +903,28 @@ class LfDServer(LfD):
         if not self._is_home():
             self.home()
 
-    # --- cancellation coordination --------------------------------------
+    def _restore_normal_stiffness(self):
+        try:
+            self.set_stiffness(
+                self.K_pos, self.K_pos, self.K_pos,
+                self.K_ori, self.K_ori, self.K_ori, 0,
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Could not restore stiffness: {exc}")
+
+    def _start_inputs(self):
+        self.keyboard_start()
+        self.frankabuttons_start()
+        self.joy_start()
+
+    def _stop_inputs(self):
+        for stop in (self.keyboard_stop, self.frankabuttons_stop, self.joy_stop):
+            try:
+                stop()
+            except Exception as exc:
+                self.get_logger().warning(f"Could not stop input listener: {exc}")
+
+    # --- global cancellation coordination -------------------------------
 
     def _request_active_cancel(self):
         with self._state_lock:
@@ -425,11 +932,18 @@ class LfDServer(LfD):
                 return
             self._cancel_sent = True
             goal_id = self._active_goal.goal_id
+            action_name = self._active_action_name
+
+        try:
+            self.stop()
+            self.stop_gripper()
+        except Exception as exc:
+            self.get_logger().warning(f"Could not stop motion immediately: {exc}")
 
         request = CancelGoal.Request()
         request.goal_info.goal_id = goal_id
         try:
-            future = self._cancel_client.call_async(request)
+            future = self._cancel_clients[action_name].call_async(request)
             future.add_done_callback(
                 lambda response_future: self._cancel_response(
                     response_future, bytes(goal_id.uuid)
@@ -439,7 +953,7 @@ class LfDServer(LfD):
             with self._state_lock:
                 self._cancel_error = f"could not request cancellation: {exc}"
 
-    def _cancel_response(self, future, requested_goal_id: bytes):
+    def _cancel_response(self, future, requested_goal_id):
         error = ""
         try:
             response = future.result()
@@ -466,7 +980,7 @@ class LfDServer(LfD):
                 and active_matches
                 and not already_canceling
             ):
-                error = "cancel request did not select the active task"
+                error = "cancel request did not select the active operation"
         except Exception as exc:
             error = f"cancel request failed: {exc}"
         if error:
@@ -474,28 +988,11 @@ class LfDServer(LfD):
             with self._state_lock:
                 self._cancel_error = error
 
-    def _finish_active_task(self, cleanup_error: str, outcome: str):
-        with self._state_lock:
-            stop_error = cleanup_error or self._cancel_error
-            deferred = list(self._deferred_stop_goals)
-            self._deferred_stop_goals.clear()
-            for stop_goal in deferred:
-                stop_id = self._goal_id(stop_goal)
-                self._stop_errors[stop_id] = stop_error
-                self._stop_outcomes[stop_id] = outcome
-            self._active_goal = None
-            self._task_busy = False
-            self._cancel_sent = False
-            self._cancel_error = ""
-
-        for stop_goal in deferred:
-            stop_goal.execute()
-
     @staticmethod
-    def _goal_id(goal_handle) -> bytes:
+    def _goal_id(goal_handle):
         return bytes(goal_handle.goal_id.uuid)
 
-    # --- progress and local GUI ------------------------------------------
+    # --- progress and local GUI -----------------------------------------
 
     def _publish_feedback(
         self, goal_handle, phase, parts, index=0, part=None, progress=0.0
@@ -513,11 +1010,10 @@ class LfDServer(LfD):
         except Exception as exc:
             self.get_logger().warning(f"Could not publish task feedback: {exc}")
 
-    def _queue_signalizer(self, state: str):
+    def _queue_signalizer(self, state):
         self._signalizer_states.put(state)
 
     def pump_signalizer(self):
-        """Apply queued Tk changes from the main thread and process redraws."""
         latest = None
         try:
             while True:
@@ -526,6 +1022,10 @@ class LfDServer(LfD):
             pass
         if latest == "executing":
             self.signalizer.signalize_execution()
+        elif latest == "ready":
+            self.signalizer.signalize_ready_demonstration()
+        elif latest == "recording":
+            self.signalizer.signalize_demonstration()
         elif latest == "idle":
             self.signalizer.signalize_idle()
         self.signalizer.root.update()
@@ -543,10 +1043,8 @@ def main():
         server = LfDServer()
         server.start()
         server.get_logger().info(
-            f"LfD server ready: action {ACTION_NAME}, topic {SKILL_COMMAND_TOPIC}"
+            "LfD server ready: execute, record, home, and template reservation"
         )
-        # SpinningRosNode already owns a MultiThreadedExecutor. The main thread
-        # stays available for Tk, whose widgets may only be touched here.
         while rclpy.ok():
             server.pump_signalizer()
             time.sleep(0.05)
@@ -558,6 +1056,7 @@ def main():
     finally:
         if server is not None:
             try:
+                server._stop_inputs()
                 server.signalizer.close()
                 server.destroy_node()
             except Exception:

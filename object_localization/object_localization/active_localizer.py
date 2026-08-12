@@ -2,7 +2,7 @@
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image
-from panda_control import Panda, SpinningRosNode
+from panda_control import SpinningRosNode
 from panda_control.home_pose import HOME_POSE
 from panda_control.pose_transform_functions import orientation_2_quaternion, pose_st_2_transformation, position_2_array, pos_quat_2_pose_st, transformation_2_pose, transform_pose, list_2_quaternion, transform_pos_ori, list_2_quaternion, pos_quat_2_pose_st
 
@@ -117,8 +117,7 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         if translation is None:
             return (f"no {ROBOT_BASE_TF_FRAME} -> panda_hand transform; the camera "
                     f"rides on the end effector, so there is nowhere to put the "
-                    f"objects (is the panda node running? otherwise: "
-                    f"ros2 run panda_control panda_idle)")
+                    f"objects (is the persistent lfd_server running?)")
 
         if self.curr_pos is None:
             # No pose feed to judge distance from home with. The transform above
@@ -268,6 +267,18 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
             
             try:
                 resp = self.compute_box_tf.call(request=ComputeLocalization.Request(img=self._img))
+                if not resp.success:
+                    # A single miss can be a blurred frame mid-approach, so spend
+                    # the same budget the convergence loop gets before giving up.
+                    self.timeout_counter += 1
+                    if self.timeout_counter >= self.timeout_counter_max:
+                        res.success = False
+                        res.message = "object not detected"
+                        self.get_logger().error(
+                            "Localization aborted: object not detected")
+                        return res
+                    self._rate.sleep()
+                    continue
                 box_tf = resp.pose
                 ori = [
                     resp.pose.pose.orientation.x,
@@ -299,6 +310,8 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
             print("", flush=True)
             if (pos_error < self.position_accuracy and yaw_error < self.orientation_accuracy) or self.timeout_counter >= self.timeout_counter_max:
                 print(f"Localization finished! final error: {pos_error + yaw_error}", flush=True)
+                res.success = True
+                res.message = f"final error: {pos_error + yaw_error}"
                 return res
             self.timeout_counter = self.timeout_counter + 1
 

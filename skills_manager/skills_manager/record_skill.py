@@ -1,48 +1,74 @@
 #!/usr/bin/env python3
-"""
-Recording trajectories and storing them into a databaseself.
-"""
-from skills_manager.lfd import LfD
+"""Compatibility CLI client for the persistent RecordSkill action."""
+import time
+
 import rclpy
-from skills_manager.ros_param_manager import get_remote_parameter
-from skills_manager.ros_param_manager import set_remote_parameters
-from panda_control.home_pose import HOME_POSE
+from lfd_msgs.action import RecordSkill
+from lfd_msgs.srv import Heartbeat
+from rclpy.action import ActionClient
+from rclpy.node import Node
+
 
 def main():
     rclpy.init()
-    lfd = LfD()
+    node = Node("recording_node")
+    client = ActionClient(node, RecordSkill, "/lfd/record_skill")
+    heartbeat = node.create_client(Heartbeat, "/lfd/record_skill/heartbeat")
+    state = {"recording_id": "", "phase": ""}
+    goal_handle = None
+
+    def feedback(message):
+        value = message.feedback
+        state["recording_id"] = value.recording_id
+        if value.phase != state["phase"]:
+            state["phase"] = value.phase
+            print(value.phase, flush=True)
+
     try:
-        lfd.start()
-        lfd.keyboard_start()
-        lfd.frankabuttons_start()
-        lfd.joy_start()
-        # lfd.teleop_start()
+        node.declare_parameter("name_skill", "skill")
+        node.declare_parameter("name_template", "")
+        node.declare_parameter("homing", True)
+        node.declare_parameter("overwrite_existing", False)
+        if not client.wait_for_server(timeout_sec=10.0):
+            raise RuntimeError("lfd_server RecordSkill action is unavailable")
 
-        lfd.declare_parameter('name_skill', "no_skill_specified")
-        lfd.declare_parameter('name_template', "")
-        lfd.declare_parameter('move_start_flag', False)
-        name_skill = get_remote_parameter(lfd, "name_skill", server="recording_node")
-        name_template = get_remote_parameter(lfd, "name_template", server="recording_node")
-        move_start_flag = get_remote_parameter(lfd, "move_start_flag", server="recording_node")
+        goal = RecordSkill.Goal()
+        goal.skill_name = str(node.get_parameter("name_skill").value)
+        goal.template_name = str(node.get_parameter("name_template").value)
+        goal.home_before_recording = bool(node.get_parameter("homing").value)
+        goal.overwrite_existing = bool(
+            node.get_parameter("overwrite_existing").value
+        )
+        sent = client.send_goal_async(goal, feedback_callback=feedback)
+        rclpy.spin_until_future_complete(node, sent)
+        goal_handle = sent.result()
+        if not goal_handle.accepted:
+            raise RuntimeError("RecordSkill request rejected")
 
-        print(f"Recording skill: {name_skill}", flush=True)
-        print(f"First, localizing: {name_template}", flush=True)
-        if move_start_flag:
-            orientation_wxyz = HOME_POSE.orientation_wxyz
-            set_remote_parameters(lfd, ["position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"],
-                [*HOME_POSE.position, *orientation_wxyz[1:], orientation_wxyz[0]],
-                server="localizer_node")
-            lfd.home_gripper(); lfd.move_template_start() # I need to always see both robot and gripper moving for sanity check
-        lfd.localize(name_template)
-        
-        lfd.traj_rec()
-        lfd.save(name_skill)
+        result = goal_handle.get_result_async()
+        next_heartbeat = 0.0
+        while rclpy.ok() and not result.done():
+            rclpy.spin_once(node, timeout_sec=0.2)
+            now = time.monotonic()
+            if state["recording_id"] and now >= next_heartbeat:
+                request = Heartbeat.Request()
+                request.session_id = state["recording_id"]
+                if heartbeat.service_is_ready():
+                    heartbeat.call_async(request)
+                next_heartbeat = now + 5.0
+        if result.done():
+            print(result.result().result.message, flush=True)
     except KeyboardInterrupt:
-        pass
+        if goal_handle is not None:
+            cancel = goal_handle.cancel_goal_async()
+            rclpy.spin_until_future_complete(node, cancel, timeout_sec=2.0)
+    except Exception as exc:
+        node.get_logger().error(str(exc))
     finally:
-        lfd.frankabuttons_stop()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
-    rclpy.shutdown()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

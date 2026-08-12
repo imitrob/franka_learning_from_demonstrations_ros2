@@ -191,7 +191,12 @@ class Localizer(object):
         """Camera-to-object range assumed when the template was captured (m)."""
         return float(self._box_depth)
 
-    def compute_tf(self) -> np.ndarray:
+    def compute_tf(self) -> Optional[np.ndarray]:
+        # None, not an exception: detect_points leaves the points cleared when
+        # the template is not in the picture, which is an ordinary outcome the
+        # caller has to report back rather than a fault.
+        if self._src_pts is None or self._dst_pts is None:
+            return None
 
         p0 = np.transpose(np.array(self._src_pts))[:, 0, :] - self.cx_cy_array
         p1 = np.transpose(np.array(self._dst_pts))[:, 0, :] - self.cx_cy_array
@@ -199,8 +204,10 @@ class Localizer(object):
 
         return T0
 
-    def compute_full_tf_in_m(self) -> np.ndarray:
+    def compute_full_tf_in_m(self) -> Optional[np.ndarray]:
         T0 = self.compute_tf()
+        if T0 is None:
+            return None
         T0[0, 2] /= self._pixel_m_factor_u
         T0[1, 2] /= self._pixel_m_factor_v
         T = np.identity(4)

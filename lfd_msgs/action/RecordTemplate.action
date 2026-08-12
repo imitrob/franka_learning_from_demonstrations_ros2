@@ -1,0 +1,10 @@
+string template_name
+bool overwrite_existing
+---
+string message
+string saved_path
+---
+string phase
+string session_id
+# Set only when phase is "cropping".
+sensor_msgs/Image preview

@@ -1,31 +1,68 @@
 #!/usr/bin/env python3
-"""
-Playback of trajectories and storing them into a databaseself.
-"""
-from skills_manager.lfd import LfD
+"""Compatibility CLI client for the persistent ExecuteSkill action."""
 import rclpy
-from skills_manager.ros_param_manager import get_remote_parameters
+from lfd_msgs.action import ExecuteSkill
+from multi_modal_reasoning.skill_command import SkillCommand
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from trajectory_data.skill_part import SkillPart
+
+
+def command_from_skill_name(name_skill: str, name_template: str = ""):
+    part = SkillPart(name_skill)
+    template = name_template.strip() or part.object
+    if not part.action or not template:
+        raise ValueError("name_skill must be <action>__<object>")
+    if template != part.object:
+        raise ValueError("name_template must match the object in name_skill")
+
+    command = SkillCommand("", {})
+    command.action = part.action
+    # A part digit (put1__box) means the action is recorded in two parts, and
+    # the server derives one part per object: same object twice replays both.
+    command.objects = [part.object] * (2 if part.part else 1)
+    return command
+
 
 def main():
     rclpy.init()
-    lfd = LfD()
-    lfd.start()
+    node = Node("execute_node")
+    client = ActionClient(node, ExecuteSkill, "/lfd/execute_skill")
+    goal_handle = None
+    try:
+        node.declare_parameter("name_skill", "skill")
+        node.declare_parameter("name_template", "")
+        node.declare_parameter("localize_box", True)  # legacy, localization is automatic
+        command = command_from_skill_name(
+            str(node.get_parameter("name_skill").value),
+            str(node.get_parameter("name_template").value),
+        )
+        if not client.wait_for_server(timeout_sec=10.0):
+            raise RuntimeError("lfd_server ExecuteSkill action is unavailable")
 
-    lfd.declare_parameter('name_skill', "skill")
-    lfd.declare_parameter('localize_box', True)
-    lfd.declare_parameter('name_template', "sponge_template")
-    name_skill = get_remote_parameters(lfd, param_names=["name_skill"], server=lfd.get_name())[0]
-    localize_box = get_remote_parameters(lfd, param_names=["localize_box"], server=lfd.get_name())[0]
-    name_template = get_remote_parameters(lfd, param_names=["name_template"], server=lfd.get_name())[0]
-    print("Executing skill: ", name_skill, flush=True)
-    print("Localize box: ", localize_box, flush=True)
-    print("Localize template: ", name_template, flush=True)
+        goal = ExecuteSkill.Goal()
+        goal.skill_command_json = command.to_json()
+        sent = client.send_goal_async(
+            goal,
+            feedback_callback=lambda msg: print(msg.feedback.phase, flush=True),
+        )
+        rclpy.spin_until_future_complete(node, sent)
+        goal_handle = sent.result()
+        if not goal_handle.accepted:
+            raise RuntimeError("ExecuteSkill request rejected")
+        result = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(node, result)
+        print(result.result().result.message, flush=True)
+    except KeyboardInterrupt:
+        if goal_handle is not None:
+            goal_handle.cancel_goal_async()
+    except Exception as exc:
+        node.get_logger().error(str(exc))
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
-    success = lfd.play_skill(name_skill, name_template, localize_box)
 
-    save = True
-    if save and success:
-        lfd.save(name_skill+"_new")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

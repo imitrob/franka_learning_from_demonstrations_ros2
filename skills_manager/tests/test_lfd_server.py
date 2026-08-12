@@ -10,6 +10,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl-lfd-server-tests")
 
 from rclpy.action import GoalResponse
 
+from lfd_msgs.msg import OperationStatus
 from multi_modal_reasoning.skill_command import SkillCommand
 from skills_manager.lfd_server import LfDServer
 
@@ -30,8 +31,13 @@ class _Logger:
 class _AdmissionServer(LfDServer):
     def __init__(self):
         self._state_lock = threading.Lock()
-        self._task_busy = False
+        self._operation_mode = OperationStatus.IDLE
+        self._operation_id = ""
+        self._operation_target = ""
+        self._operation_phase = "idle"
+        self._operation_message = ""
         self._active_goal = None
+        self._active_action_name = ""
         self._stop_inflight = 0
         self._deferred_stop_goals = []
         self._deferred_stop_ids = set()
@@ -39,6 +45,10 @@ class _AdmissionServer(LfDServer):
         self._stop_outcomes = {}
         self._cancel_sent = False
         self._cancel_error = ""
+        self._recording_id = ""
+        self._record_deadline = 0.0
+        self._lease_id = ""
+        self._lease_deadline = 0.0
         self.cancel_requests = 0
 
     def get_logger(self):
@@ -46,6 +56,9 @@ class _AdmissionServer(LfDServer):
 
     def _request_active_cancel(self):
         self.cancel_requests += 1
+
+    def get_parameter(self, _name):
+        return SimpleNamespace(value=30.0)
 
 
 def _request(task):
@@ -64,13 +77,37 @@ def test_task_expands_to_one_or_two_skill_parts():
 def test_goal_callback_reserves_busy_before_execution_starts():
     server = _AdmissionServer()
 
-    assert server._goal_callback(_request(_task("pick", ["cube"]))) \
+    assert server._execute_goal_callback(_request(_task("pick", ["cube"]))) \
         == GoalResponse.ACCEPT
-    assert server._goal_callback(_request(_task("pick", ["bowl"]))) \
+    assert server._execute_goal_callback(_request(_task("pick", ["bowl"]))) \
         == GoalResponse.REJECT
-    assert server._goal_callback(_request(_task("stop"))) == GoalResponse.ACCEPT
-    assert server._goal_callback(_request(_task("pick", ["bowl"]))) \
+    assert server._execute_goal_callback(_request(_task("stop"))) == GoalResponse.ACCEPT
+    assert server._execute_goal_callback(_request(_task("pick", ["bowl"]))) \
         == GoalResponse.REJECT
+
+
+def test_all_robot_actions_use_the_same_operation_gate():
+    server = _AdmissionServer()
+    home = SimpleNamespace(height=0.4, front_offset=0.4, side_offset=0.0)
+
+    assert server._home_goal_callback(home) == GoalResponse.ACCEPT
+    assert server._operation_mode == OperationStatus.HOMING
+    assert server._reserve_goal_callback(SimpleNamespace(requester="template")) \
+        == GoalResponse.REJECT
+
+
+def test_recording_name_derives_the_object_and_rejects_missing_object():
+    request = SimpleNamespace(skill_name="pick__cube")
+    part = LfDServer._recording_part(request)
+    assert (part.action, part.object) == ("pick", "cube")
+
+    for invalid in ("", "pick", "__cube", "pick__cube_trial_1"):
+        try:
+            LfDServer._recording_part(SimpleNamespace(skill_name=invalid))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid recording name {invalid!r}")
 
 
 def test_server_rejects_unsupported_parameters_and_arities():
@@ -128,6 +165,15 @@ class _ExecutionServer(LfDServer):
     def _queue_signalizer(self, state):
         self.events.append(("signal", state))
 
+    def _start_inputs(self):
+        self.events.append(("inputs", "start"))
+
+    def _stop_inputs(self):
+        self.events.append(("inputs", "stop"))
+
+    def _set_operation_phase(self, phase, message=""):
+        self.events.append(("phase", phase, message))
+
     def _publish_feedback(self, _goal, phase, _parts, index=0, part=None,
                           progress=0.0):
         self.events.append(("feedback", phase, index,
@@ -148,7 +194,7 @@ class _ExecutionServer(LfDServer):
     def _execute_part(self, _goal, _parts, _index, part):
         self.events.append(("execute", part.name))
 
-    def _finish_active_task(self, cleanup_error, outcome):
+    def _finish_operation(self, cleanup_error, outcome):
         self.events.append(("finish", cleanup_error, outcome))
 
 
@@ -178,21 +224,21 @@ def test_stop_waits_for_the_reserved_task_then_completes_after_cleanup():
     task_goal = _Goal(task, bytes(range(16)))
     stop_goal = _Goal(stop, bytes(range(1, 17)))
 
-    assert server._goal_callback(_request(task)) == GoalResponse.ACCEPT
-    assert server._goal_callback(_request(stop)) == GoalResponse.ACCEPT
+    assert server._execute_goal_callback(_request(task)) == GoalResponse.ACCEPT
+    assert server._execute_goal_callback(_request(stop)) == GoalResponse.ACCEPT
 
     # A stop can arrive before the accepted task has its server goal handle.
-    server._handle_accepted_callback(stop_goal)
-    server._handle_accepted_callback(task_goal)
+    server._execute_accepted_callback(stop_goal)
+    server._execute_accepted_callback(task_goal)
 
     assert stop_goal.execute_count == 0
     assert task_goal.execute_count == 1
     assert server.cancel_requests == 1
 
-    server._finish_active_task("", "canceled")
+    server._finish_operation("", "canceled")
 
     assert stop_goal.execute_count == 1
-    assert not server._task_busy
+    assert server._operation_mode == OperationStatus.IDLE
 
 
 class _CancelExecutionServer(_ExecutionServer):

@@ -15,13 +15,32 @@ class SpinningRosNode(Node):
         super(SpinningRosNode, self).__init__(f"panda_node_{np.random.randint(100000)}") # node name replaced by launch description
         executor = MultiThreadedExecutor(num_threads=4)
         executor.add_node(self)
-        spinning_thread = threading.Thread(target=executor.spin, daemon=True)
+        spinning_thread = threading.Thread(
+            target=self._spin_forever, args=(executor,), daemon=True
+        )
         spinning_thread.start()
 
         self.callback_group = ReentrantCallbackGroup()
 
         self.get_remote_parameter = get_remote_parameter
         self.set_remote_parameter = set_remote_parameter
+
+    def _spin_forever(self, executor):
+        """Keep serving after a callback raises.
+
+        A single failing callback (a dead client that cannot receive its goal
+        response, for instance) used to propagate out of executor.spin() and
+        kill this thread, leaving the process alive but deaf: action servers
+        stopped answering and clients hung forever with no log line.
+        """
+        while rclpy.ok():
+            try:
+                executor.spin()
+                return  # clean shutdown
+            except ExternalShutdownException:
+                return
+            except Exception as exc:  # noqa: BLE001 -- must survive any callback
+                self.get_logger().error(f"Executor callback failed: {exc}")
 
     def declare_parameter_and_get(self, name, default_value):
         try:

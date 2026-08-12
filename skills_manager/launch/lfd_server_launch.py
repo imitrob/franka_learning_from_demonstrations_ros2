@@ -16,6 +16,16 @@ def generate_launch_description():
         default_value="0.1",
         description="Angular distance from HOME_POSE that counts as home (rad)",
     )
+    record_heartbeat_timeout = DeclareLaunchArgument(
+        "record_heartbeat_timeout",
+        default_value="30.0",
+        description="Seconds without a recording-client heartbeat before discard",
+    )
+    template_lease_timeout = DeclareLaunchArgument(
+        "template_lease_timeout",
+        default_value="30.0",
+        description="Seconds without a template-capture heartbeat before release",
+    )
     server = Node(
         package="skills_manager",
         executable="lfd_server",
@@ -26,6 +36,18 @@ def generate_launch_description():
             "home_orientation_tolerance": LaunchConfiguration(
                 "home_orientation_tolerance"
             ),
+            "record_heartbeat_timeout": LaunchConfiguration(
+                "record_heartbeat_timeout"
+            ),
+            "template_lease_timeout": LaunchConfiguration(
+                "template_lease_timeout"
+            ),
         }],
     )
-    return LaunchDescription([home_tolerance, home_orientation_tolerance, server])
+    return LaunchDescription([
+        home_tolerance,
+        home_orientation_tolerance,
+        record_heartbeat_timeout,
+        template_lease_timeout,
+        server,
+    ])

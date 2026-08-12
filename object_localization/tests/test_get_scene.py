@@ -1092,7 +1092,7 @@ def test_missing_arm_transform_is_named_not_silent(scene, monkeypatch):
         reason = active._untrustworthy_view()
         assert reason is not None, "a missing arm transform was treated as trustworthy"
         assert "panda_hand" in reason and "panda" in reason.lower()
-        assert "panda_idle" in reason, "the log should say how to fix it"
+        assert "lfd_server" in reason, "the log should say how to fix it"
     finally:
         active.publishing_scene = False
         active.destroy_node()

@@ -1,3 +1,6 @@
 sensor_msgs/Image img
 ---
 geometry_msgs/PoseStamped pose
+# False when the template was not found in the image: `pose` is meaningless
+# then, and the caller has to stop rather than servo toward an identity delta.
+bool success

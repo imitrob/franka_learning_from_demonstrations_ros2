@@ -6,7 +6,6 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from ament_index_python.packages import get_package_share_directory
-import os
 
 def generate_launch_description():
     # Declare launch arguments
@@ -22,8 +21,8 @@ def generate_launch_description():
     )
     localize_template_arg = DeclareLaunchArgument(
         'name_template', 
-        default_value='sponge_template', 
-        description='Template name'
+        default_value='',
+        description='Optional template name; must match name_skill object'
     )
 
     # Define the execute_node

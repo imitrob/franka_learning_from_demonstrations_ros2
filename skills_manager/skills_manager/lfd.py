@@ -1,6 +1,9 @@
 #%%
 #!/usr/bin/env python
-import time, math, time
+import math
+import os
+import tempfile
+import time
 import quaternion
 import numpy as np
 import tf2_ros
@@ -13,7 +16,7 @@ from panda_control import Panda, SpinningRosNode
 from skills_manager.feedback import Feedback
 from skills_manager.signalizer import Signalizator
 from skills_manager.insertion import Insertion
-from skills_manager.transfom import Transform 
+from skills_manager.transfom import Transform
 from panda_control.pose_transform_functions import position_2_array, pos_quat_2_pose_st, list_2_quaternion, invert_tf
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from skills_manager.ros_param_manager import get_remote_parameters
@@ -67,9 +70,10 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
         return self.time_index / self.loaded_trajectory_len
 
-    def traj_rec(self, trigger: float = 0.005, roll_redution_alpha: float = 0.4):
+    def traj_rec(self, trigger: float = 0.005, roll_redution_alpha: float = 0.4,
+                 should_stop=None, on_phase=None, signalize: bool = True):
         """ Demonstrate a trajectory with either joystic, gestures, or kinesthetic teaching.
-        Fills: 
+        Fills:
             self.recorded_traj
             self.recorded_ori_wxyz
             self.recorded_gripper
@@ -80,135 +84,152 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         Args:
             roll_reduction_alpha: float. When controlled externally (joystick/gestures), we let roll->0 as the user cannot control it.
         """
-        self.signalizer.signalize_ready_demonstration()
+        should_stop = should_stop or (lambda: False)
+        if signalize:
+            self.signalizer.signalize_ready_demonstration()
+        if on_phase:
+            on_phase("ready")
 
-        while self.end or self.pause:
-            self.end = False
-            self.pause = False
-            time.sleep(0.1)
-        self.set_stiffness(0,0,0,0,0,0,0)
-
-        init_pos = self.curr_pos
-        vel = 0 
-        print("Move robot to start recording.", flush=True)
-        while vel < trigger:
-            if self.end:
-                break
-            self.r.sleep()
-
-            if self.is_applied_external_feedback(): # feedback changed and not kinesthetic teaching
+        # Old one-shot callers may carry a stale end flag. An action caller
+        # supplies should_stop and deliberately treats an early finish as done.
+        if on_phase is None:
+            while self.end or self.pause:
+                self.end = False
+                self.pause = False
                 time.sleep(0.1)
-                print("External control, setting stiffness!", flush=True)
-                self.set_stiffness(1000, 1000, 1000, 400, 400, 400, 0)
-                break
-            vel = math.sqrt((self.curr_pos[0]-init_pos[0])**2 + (self.curr_pos[1]-init_pos[1])**2 + (self.curr_pos[2]-init_pos[2])**2)
+        elif self.end or should_stop():
+            return False
 
-        self.recorded_traj = self.curr_pos
-        self.recorded_ori_wxyz = self.curr_ori_wxyz
-        self.recorded_gripper= self.grip_value
-        self.recorded_img_feedback_flag = np.array([0])
-        self.recorded_spiral_flag = np.array([0])
-        self.init_additional_flags()
-        self.recorded_img = self.pub_rec_image()
+        recording_started = False
+        self.set_stiffness(0,0,0,0,0,0,0)
+        try:
+            init_pos = self.curr_pos
+            vel = 0
+            print("Move robot to start recording.", flush=True)
+            while vel < trigger and not self.end and not should_stop():
+                self.r.sleep()
 
-        self.signalizer.signalize_demonstration()
-        print("Recording started. Press e to stop.")
-        while not self.end:
-            while(self.pause):
-                print("Paused", flush=True)
-                time.sleep(0.5)
-            t0 = time.perf_counter()
-            self.recorded_traj = np.c_[self.recorded_traj, self.curr_pos]
-            self.recorded_ori_wxyz  = np.c_[self.recorded_ori_wxyz, self.curr_ori_wxyz]
-            self.recorded_gripper = np.c_[self.recorded_gripper, self.grip_value]
-            self.recorded_img = np.r_[self.recorded_img, self.pub_rec_image()]
-            
-            self.recorded_img_feedback_flag = np.c_[self.recorded_img_feedback_flag, self.img_feedback_flag]
-            self.recorded_spiral_flag = np.c_[self.recorded_spiral_flag, self.spiral_flag]
-            
-            cx, cy, cz, cw = self.curr_ori_xyzw
-            q_curr = sm.UnitQuaternion([cw, cx, cy, cz])  # [w,x,y,z]
-            goal = PoseStamped()
+                if self.is_applied_external_feedback(): # feedback changed and not kinesthetic teaching
+                    time.sleep(0.1)
+                    print("External control, setting stiffness!", flush=True)
+                    self.set_stiffness(1000, 1000, 1000, 400, 400, 400, 0)
+                    break
+                vel = math.sqrt((self.curr_pos[0]-init_pos[0])**2 + (self.curr_pos[1]-init_pos[1])**2 + (self.curr_pos[2]-init_pos[2])**2)
 
-            trans_speed = 0.0
-            if self.gesture_feedback is not None:
-                if np.linalg.norm(np.array(self.gesture_feedback) - np.array(self.curr_pos)) > 0.2:
-                    print(f"too big step, safe quitting, would go to {self.gesture_feedback} from {self.curr_pos} in one step", )
-                    continue
-                goal.pose.position = Point(
-                    x=self.gesture_feedback[0],
-                    y=self.gesture_feedback[1],
-                    z=self.gesture_feedback[2],
-                )
+            if self.end or should_stop():
+                return False
 
-            elif self.joystick_feedback is not None:
-                goal.pose.position = Point(
-                    x=self.curr_pos[0] + self.joystick_feedback[0],
-                    y=self.curr_pos[1] + self.joystick_feedback[1],
-                    z=self.curr_pos[2] + self.joystick_feedback[2],
-                )
-                trans_speed = np.linalg.norm(self.joystick_feedback)
+            self.recorded_traj = self.curr_pos
+            self.recorded_ori_wxyz = self.curr_ori_wxyz
+            self.recorded_gripper= self.grip_value
+            self.recorded_img_feedback_flag = np.array([0])
+            self.recorded_spiral_flag = np.array([0])
+            self.init_additional_flags()
+            self.recorded_img = self.pub_rec_image()
+            recording_started = True
 
-            else:
-                goal.pose.position = Point(
-                    x=self.curr_pos[0],
-                    y=self.curr_pos[1],
-                    z=self.curr_pos[2],
-                )
+            if signalize:
+                self.signalizer.signalize_demonstration()
+            if on_phase:
+                on_phase("recording")
+            print("Recording started. Press e to stop.")
+            while not self.end and not should_stop():
+                while(self.pause and not should_stop()):
+                    print("Paused", flush=True)
+                    time.sleep(0.5)
+                if should_stop():
+                    break
+                t0 = time.perf_counter()
+                self.recorded_traj = np.c_[self.recorded_traj, self.curr_pos]
+                self.recorded_ori_wxyz  = np.c_[self.recorded_ori_wxyz, self.curr_ori_wxyz]
+                self.recorded_gripper = np.c_[self.recorded_gripper, self.grip_value]
+                self.recorded_img = np.r_[self.recorded_img, self.pub_rec_image()]
+
+                self.recorded_img_feedback_flag = np.c_[self.recorded_img_feedback_flag, self.img_feedback_flag]
+                self.recorded_spiral_flag = np.c_[self.recorded_spiral_flag, self.spiral_flag]
+
+                cx, cy, cz, cw = self.curr_ori_xyzw
+                q_curr = sm.UnitQuaternion([cw, cx, cy, cz])  # [w,x,y,z]
+                goal = PoseStamped()
+
+                trans_speed = 0.0
+                if self.gesture_feedback is not None:
+                    if np.linalg.norm(np.array(self.gesture_feedback) - np.array(self.curr_pos)) > 0.2:
+                        print(f"too big step, safe quitting, would go to {self.gesture_feedback} from {self.curr_pos} in one step", )
+                        continue
+                    goal.pose.position = Point(
+                        x=self.gesture_feedback[0],
+                        y=self.gesture_feedback[1],
+                        z=self.gesture_feedback[2],
+                    )
+
+                elif self.joystick_feedback is not None:
+                    goal.pose.position = Point(
+                        x=self.curr_pos[0] + self.joystick_feedback[0],
+                        y=self.curr_pos[1] + self.joystick_feedback[1],
+                        z=self.curr_pos[2] + self.joystick_feedback[2],
+                    )
+                    trans_speed = np.linalg.norm(self.joystick_feedback)
+
+                else:
+                    goal.pose.position = Point(
+                        x=self.curr_pos[0],
+                        y=self.curr_pos[1],
+                        z=self.curr_pos[2],
+                    )
 
             # Joystick increments (radians): Z (yaw), Y (pitch)
-            dqz = sm.UnitQuaternion.Rz(self.rot_feedback[0])
-            dqy = sm.UnitQuaternion.Ry(self.rot_feedback[1])
+                dqz = sm.UnitQuaternion.Rz(self.rot_feedback[0])
+                dqy = sm.UnitQuaternion.Ry(self.rot_feedback[1])
 
-            q_pre = q_curr * dqz * dqy
+                q_pre = q_curr * dqz * dqy
 
-            alpha_when_moving = 0.02
-            alpha = alpha_when_moving + (roll_redution_alpha - alpha_when_moving) * np.exp(-4.0*trans_speed)
-            q_goal = Transform.step_toward_roll(q_pre, alpha=alpha)
-    
-            qx, qy, qz, qw = q_goal.vec_xyzs  # returns (x,y,z,w)
-            goal.pose.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
+                alpha_when_moving = 0.02
+                alpha = alpha_when_moving + (roll_redution_alpha - alpha_when_moving) * np.exp(-4.0*trans_speed)
+                q_goal = Transform.step_toward_roll(q_pre, alpha=alpha)
 
+                qx, qy, qz, qw = q_goal.vec_xyzs  # returns (x,y,z,w)
+                goal.pose.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
+
+                self.move_to_pose_with_stampedpose(goal)
+                if self.feedback_gripper == "grasp":
+                    print("closing gripper")
+
+                    if not self.gripper_state.is_grasped:
+                        self.grasp_gripper(0)
+                    time.sleep(0.1)
+                    self.feedback_gripper = ""
+
+                if self.feedback_gripper == "open":
+                    print("open gripper")
+                    self.move_gripper(self.grip_open_width)
+                    time.sleep(0.1)
+                    self.feedback_gripper = ""
+
+                self.update_additional_flags()
+                if (time.perf_counter() - t0) * 0.8 > (1.0 / self.freq):
+                    print(f"WARN: trajectory recording at {round(1.0 / (time.perf_counter() - t0))} samples per sec")
+                self.r.sleep()
+        finally:
+            goal = PoseStamped()
+            goal.header.stamp = self.get_clock().now().to_msg()
+            goal.header.frame_id = "map"
+            goal.pose.position.x = self.curr_pos[0]
+            goal.pose.position.y = self.curr_pos[1]
+            goal.pose.position.z = self.curr_pos[2]
+            goal.pose.orientation.w = self.curr_ori_wxyz[0]
+            goal.pose.orientation.x = self.curr_ori_wxyz[1]
+            goal.pose.orientation.y = self.curr_ori_wxyz[2]
+            goal.pose.orientation.z = self.curr_ori_wxyz[3]
             self.move_to_pose_with_stampedpose(goal)
-            if self.feedback_gripper == "grasp":
-                print("closing gripper")
+            self.set_stiffness(self.K_pos, self.K_pos, self.K_pos,
+                               self.K_ori, self.K_ori, self.K_ori, 0)
+            self.get_logger().info("Ending trajectory recording")
+            if signalize:
+                self.signalizer.signalize_idle()
+        return recording_started
 
-                if not self.gripper_state.is_grasped:
-                    self.grasp_gripper(0)
-                time.sleep(0.1)
-                self.feedback_gripper = ""
-
-            if self.feedback_gripper == "open":
-                print("open gripper")
-                self.move_gripper(self.grip_open_width)
-                time.sleep(0.1)
-                self.feedback_gripper = ""
-
-            self.update_additional_flags()
-            if (time.perf_counter() - t0) * 0.8 > (1.0 / self.freq):
-                print(f"WARN: trajectory recording at {round(1.0 / (time.perf_counter() - t0))} samples per sec")
-            self.r.sleep()
-
-        goal = PoseStamped()
-        goal.header.stamp = self.get_clock().now().to_msg()
-        goal.header.frame_id = "map"
-
-        goal.pose.position.x = self.curr_pos[0]
-        goal.pose.position.y = self.curr_pos[1]
-        goal.pose.position.z = self.curr_pos[2]
-        
-        goal.pose.orientation.w = self.curr_ori_wxyz[0]
-        goal.pose.orientation.x = self.curr_ori_wxyz[1]
-        goal.pose.orientation.y = self.curr_ori_wxyz[2]
-        goal.pose.orientation.z = self.curr_ori_wxyz[3]
-        
-        self.move_to_pose_with_stampedpose(goal)
-
-        self.set_stiffness(self.K_pos, self.K_pos, self.K_pos, self.K_ori, self.K_ori, self.K_ori, 0)
-        self.get_logger().info("Ending trajectory recording")
-        self.signalizer.signalize_idle()
-
-    def save(self, file: str = 'last') -> bool:
+    def save(self, file: str = 'last', overwrite: bool = True) -> bool:
         if self.recorded_traj is None or self.recorded_ori_wxyz is None:
             print("Cannot save, recording is empty", flush=True)
             return False
@@ -216,13 +237,31 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         if self.final_transform is not None:
             self.recorded_traj, self.recorded_ori_wxyz = self.transform_traj_ori(self.recorded_traj, self.recorded_ori_wxyz, invert_tf(self.final_transform))
 
-        np.savez(trajectory_data.package_path + '/trajectories/' + str(file) + '.npz',
-                 traj=self.recorded_traj,
-                 ori=self.recorded_ori_wxyz,
-                 grip=self.recorded_gripper,
-                 img=self.recorded_img, 
-                 img_feedback_flag=self.recorded_img_feedback_flag,
-                 spiral_flag=self.recorded_spiral_flag)
+        directory = os.path.join(trajectory_data.package_path, "trajectories")
+        os.makedirs(directory, exist_ok=True)
+        target = os.path.join(directory, f"{file}.npz")
+        if os.path.exists(target) and not overwrite:
+            raise FileExistsError(f"skill {file!r} already exists")
+
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", suffix=".npz", dir=directory, delete=False
+            ) as stream:
+                temporary = stream.name
+                np.savez(stream,
+                         traj=self.recorded_traj,
+                         ori=self.recorded_ori_wxyz,
+                         grip=self.recorded_gripper,
+                         img=self.recorded_img,
+                         img_feedback_flag=self.recorded_img_feedback_flag,
+                         spiral_flag=self.recorded_spiral_flag)
+            from trajectory_data.skill_part import SkillPart
+            SkillPart(os.path.basename(temporary)).validate_archive(directory)
+            os.replace(temporary, target)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
         return True
 
     def load(self, file='last'):
@@ -235,7 +274,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.loaded_spiral_flag = data['spiral_flag']
         if self.final_transform is not None:
             self.loaded_traj, self.loaded_ori_wxyz = self.transform_traj_ori(self.loaded_traj, self.loaded_ori_wxyz, self.final_transform)
-        
+
         self.filename=str(file)
 
     def init_additional_flags(self):
@@ -255,8 +294,14 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
             print("Returned because localizer not succesful", flush=True)
             return False
         self.move_template_start()
-        self.active_localizer_client.call(Trigger.Request())
-        self.compute_final_transform() 
+        active = self.active_localizer_client.call(Trigger.Request())
+        if active is None or not active.success:
+            # The object is not where the template says it is: servoing produced
+            # no delta, so the recorded trajectory would run against thin air.
+            reason = "no response" if active is None else active.message
+            print(f"Returned because localization failed: {reason}", flush=True)
+            return False
+        self.compute_final_transform()
 
     def play_skill(self, name_skill, object_template_name, localize_box=True):
         if localize_box:
@@ -268,34 +313,34 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                 return
             self.move_template_start()
             self.active_localizer_client.call(Trigger.Request())
-            self.compute_final_transform() 
+            self.compute_final_transform()
         try:
             self.load(name_skill)
             print(f"Execution", flush=True)
             self.execute()
         except KeyboardInterrupt:
             print("Keyboard interrupted", flush=True)
-        
+
     def move_template_start(self):
         pose = get_remote_parameters(self, param_names=[
-            "position_x", "position_y", "position_z", 
+            "position_x", "position_y", "position_z",
             "orientation_w", "orientation_x", "orientation_y", "orientation_z"],
             server="localizer_node")
 
         assert pose[2] > 0.02
         pos_array = pose[:3]
         quat_wxyz = quaternion.quaternion(pose[3], pose[4], pose[5], pose[6])
-        
+
         goal = pos_quat_2_pose_st(pos_array, quat_wxyz)
         goal.header.stamp = self.get_clock().now().to_msg()
 
         print(f"Move to start: x={goal.pose.position.x} y={goal.pose.position.y} y={goal.pose.position.z}", flush=True)
-        
-        self.go_to_pose_ik(goal)    
+
+        self.go_to_pose_ik(goal)
 
         if not np.allclose(self.curr_pos, pose[:3], atol=2e-3) or not np.allclose(self.curr_ori_wxyz, pose[3:], atol=2e-2):
             self.set_stiffness(2000,2000,2000,150,150,150,0)
-            self.go_to_pose_ik(goal)    
+            self.go_to_pose_ik(goal)
             self.set_stiffness(1000,1000,1000,80,80,80,0)
 
     # player
@@ -320,7 +365,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
     def pub_rec_image(self):
         resized_img_gray=image_process(self.curr_image, self.ds_factor,  self.row_crop_pct_top , self.row_crop_pct_bot, self.col_crop_pct_left, self.col_crop_pct_right)
-        
+
         resized_img_msg = self.bridge.cv2_to_imgmsg(resized_img_gray)
         resized_img_msg.header.frame_id = f"{self.time_index}|{self.filename}" # frame_id is set to timestep index
         self.cropped_img_pub.publish(resized_img_msg)
@@ -344,8 +389,8 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.go_to_pose_ik(start)
 
         self.set_stiffness(self.K_pos, self.K_pos, self.K_pos, self.K_ori, self.K_ori, self.K_ori, 0)
-        self.gripper_step(self.loaded_gripper[0][0])            
-        
+        self.gripper_step(self.loaded_gripper[0][0])
+
         # init recording of new execution attempt
         self.recorded_traj = self.curr_pos
         self.recorded_ori_wxyz = self.curr_ori_wxyz
@@ -363,16 +408,16 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         goal = pos_quat_2_pose_st(self.loaded_traj[:, self.time_index] + self.camera_correction, quat_goal)
         goal.header.stamp = self.get_clock().now().to_msg()
         goal.header.frame_id = 'panda_link0'
-        
+
         self.correct()
 
         self.gripper_step(self.loaded_gripper[0][self.time_index])
-        
+
         self.move_to_pose_with_stampedpose(goal)
 
         # if self.loaded_img_feedback_flag[0, self.time_index]:
         #     self.sift_matching()
-        
+
         if self.loaded_spiral_flag[0, self.time_index]:
             if self.force.z > 5:
                 spiral_success, offset_correction = self.spiral_search(goal)
@@ -394,7 +439,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                 self.move_gripper(self.grip_open_width)
 
                 return 'stop'
-                
+
             self.go_to_pose(start) # PoseStamped
             self.time_index = 0
             self.retry_counter = self.retry_counter + 1

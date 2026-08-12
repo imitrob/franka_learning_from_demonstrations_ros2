@@ -46,6 +46,13 @@ def generate_launch_description():
         }],
     )
 
+    template_recorder_node = Node(
+        package="object_localization",
+        executable="template_recorder_server",
+        name="template_recorder_server",
+        output="screen",
+    )
+
     # Include the camera launch file
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -62,5 +69,6 @@ def generate_launch_description():
         scene_home_tolerance,
         localizer_node,
         active_localizer_node,
+        template_recorder_node,
         camera_launch,
     ])

@@ -26,6 +26,8 @@ def generate_launch_description():
         launch_arguments={
             "rgb_camera.profile": "1280,720,30",
             "depth_module.profile": "848,480,30",
+            "align_depth.enable": "true",
+            "enable_sync": "true",
             "log_level": "info",
             "initial_reset": "true",
             "serial_no": LaunchConfiguration("serial_no"),

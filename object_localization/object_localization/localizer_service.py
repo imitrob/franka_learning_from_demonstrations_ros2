@@ -71,6 +71,8 @@ class LocalizationService(CustomTransformListener, SpinningRosNode):
         # Template images and their SIFT descriptors are immutable, so build each
         # Localizer once instead of once per get_scene call.
         self._scene_localizers = {}
+        # Set by set_localizer; until then compute_localization has no template.
+        self._localizer = None
         self.camera_info_msg = None
 
         self.bridge = CvBridge()
@@ -258,29 +260,34 @@ class LocalizationService(CustomTransformListener, SpinningRosNode):
         
 
     def compute_localization_in_pixels(self, img: Image):
+        """Servo delta for the current template, or None if it is not visible."""
         cv_image = self.bridge.imgmsg_to_cv2(img, "bgr8")
         self._localizer.set_image(cv_image)
         self._localizer.set_camera_info(self.camera_info_msg)
-        # try:
         self._localizer.detect_points()
-
-        try: # if not successful -> annotated image not exist
-            self._localizer.annoted_image()
-        except Exception as e:
-            print(e)
-            print('Returning identity')
-            return np.identity(4)
-        
-        tf_matrix = self._localizer.compute_full_tf_in_m()
-        return tf_matrix
+        return self._localizer.compute_full_tf_in_m()
     
     def publish_annoted_image(self):
         ros_image = self.bridge.cv2_to_imgmsg(self._localizer.annoted_image(), "bgr8")
         self.image_publisher.publish(ros_image)
 
     def handle_request(self, req, response):
+        if self._localizer is None:
+            self.get_logger().warning("no template set, call set_localizer first")
+            response.success = False
+            return response
+        if self.camera_info_msg is None:
+            self.get_logger().warning("no camera_info yet, cannot localize")
+            response.success = False
+            return response
+
         tf_matrix = self.compute_localization_in_pixels(req.img)
-        
+        if tf_matrix is None:
+            self.get_logger().warning("template not found in the image")
+            response.success = False
+            return response
+        response.success = True
+
         position = tf_matrix[0:3, 3]
         try:
             quaternion = tf_transformations.quaternion_from_matrix(tf_matrix[0:4, 0:4])

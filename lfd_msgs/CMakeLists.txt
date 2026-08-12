@@ -28,9 +28,18 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ExecuteSkill.action"
+  "action/HomeRobot.action"
+  "action/RecordSkill.action"
+  "action/RecordTemplate.action"
+  "action/ReserveRobot.action"
+  "msg/OperationStatus.msg"
   "srv/ComputeLocalization.srv"
+  "srv/FinishRecording.srv"
+  "srv/Heartbeat.srv"
+  "srv/ReleaseReservation.srv"
   "srv/SetTemplate.srv"
   "srv/StringService.srv"
+  "srv/SubmitTemplateCrop.srv"
   "srv/GetScene.srv"
   
   DEPENDENCIES action_msgs builtin_interfaces std_msgs sensor_msgs geometry_msgs

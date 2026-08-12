@@ -32,8 +32,7 @@ password = '123456789'
 UPDATE_THREAD_INTERVAL = 1.0 # s
 # TF must be dense enough that tf2 can answer for an image stamp: the camera's
 # stamps are 25-50 ms old here and tf2 does not extrapolate forward, so a 1 s
-# gap makes object_localization's get_scene skip most frames. Matches the rate
-# panda_idle.py uses for the same transform.
+# gap makes object_localization's get_scene skip most frames.
 TF_BROADCAST_INTERVAL = 0.01 # s
 OPEN_GRIPPER_WIDTH = 0.06 # How much gripper opens [m]
 HIGH_POINT_DIFFERENCE = 0.1 # m
