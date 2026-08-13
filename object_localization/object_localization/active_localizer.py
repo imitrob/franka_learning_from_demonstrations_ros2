@@ -59,7 +59,7 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
 
         self.position_accuracy = 0.003
         self.orientation_accuracy=0.5 *(np.pi/180)
-        self.timeout_counter_max = 10
+        self.timeout_counter_max = 5
 
         self.goal_pose_pub = self.create_publisher(PoseStamped, "/panda/goal_pose", 5)
         self.create_subscription(PoseStamped, "/panda/curr_pose", self.curr_pose_callback, 5)

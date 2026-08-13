@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Persistent single-owner server for every operation that moves Panda."""
 import math
+import os
 import queue
 import threading
 import time
+import traceback
 import uuid
 
 import numpy as np
@@ -94,7 +96,7 @@ class LfDServer(LfD):
         self.declare_parameter("template_lease_timeout", LEASE_TIMEOUT)
 
         status_qos = QoSProfile(
-            depth=1,
+            depth=10,  # a fast phase (failed -> homing) must not overwrite its predecessor
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
@@ -425,6 +427,7 @@ class LfDServer(LfD):
         except Exception as exc:
             task_error = str(exc)
             self.get_logger().error(f"Skill task failed: {exc}")
+            self._set_operation_phase("failed", task_error)
         finally:
             try:
                 self._set_operation_phase("homing")
@@ -594,7 +597,7 @@ class LfDServer(LfD):
             self._record_feedback(goal_handle, "localizing")
             self._validate_template(template)
             if self.localize(template) is False:
-                raise RuntimeError(f"localization failed for {template!r}")
+                raise RuntimeError(f"{template} not found")
             self._raise_record_stop(goal_handle)
             if self._record_finish_requested():
                 outcome = "completed"
@@ -628,6 +631,7 @@ class LfDServer(LfD):
         except Exception as exc:
             error = str(exc)
             result.message = f"Recording failed: {exc}"
+            self._set_operation_phase("failed", error)
             goal_handle.abort()
         finally:
             self._stop_inputs()
@@ -810,7 +814,10 @@ class LfDServer(LfD):
             self._publish_feedback(
                 goal_handle, "validating", parts, index=index, part=part
             )
-            part.validate_archive()
+            try:
+                part.validate_archive()
+            except FileNotFoundError:
+                raise RuntimeError(f"{part.action} {part.object} not learned yet")
             self._validate_template(part.object)
 
     def _validate_template(self, template):
@@ -824,7 +831,7 @@ class LfDServer(LfD):
 
     def _localize_part(self, part):
         if self.localize(part.object) is False:
-            raise RuntimeError(f"localization failed for {part.object!r}")
+            raise RuntimeError(f"{part.object} not found")
 
     def _execute_part(self, goal_handle, parts, index, part):
         self.load(part.name)
@@ -1039,6 +1046,7 @@ class LfDServer(LfD):
 def main():
     rclpy.init()
     server = None
+    failed = False
     try:
         server = LfDServer()
         server.start()
@@ -1048,11 +1056,13 @@ def main():
         while rclpy.ok():
             server.pump_signalizer()
             time.sleep(0.05)
+        print("LfD server exiting: rclpy context is no longer ok", flush=True)
     except KeyboardInterrupt:
         pass
     except Exception as exc:
+        failed = True
         print(f"LfD server failed: {exc}", flush=True)
-        raise
+        traceback.print_exc()
     finally:
         if server is not None:
             try:
@@ -1063,6 +1073,7 @@ def main():
                 pass
         if rclpy.ok():
             rclpy.shutdown()
+        os._exit(1 if failed else 0)  # panda_py Desk listener is not a daemon thread
 
 
 if __name__ == "__main__":

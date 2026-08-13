@@ -8,6 +8,7 @@ from tf2_ros import TransformBroadcaster
 import rclpy
 import threading
 from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
 # from franka_gripper.msg import GraspActionGoal, HomingActionGoal, StopActionGoal, MoveActionGoal
@@ -37,6 +38,8 @@ TF_BROADCAST_INTERVAL = 0.01 # s
 OPEN_GRIPPER_WIDTH = 0.06 # How much gripper opens [m]
 HIGH_POINT_DIFFERENCE = 0.1 # m
 HIGH_ORI_DIFFERENCE = 0.01
+JOINT_NAMES = [f"panda_joint{i}" for i in range(1, 8)] + [
+    "panda_finger_joint1", "panda_finger_joint2"]
 
 from typing import Iterable
 # panda-py is chatty, activate information log level
@@ -126,7 +129,8 @@ class Panda():
 
         self.create_subscription(PoseStamped, "/panda/goal_pose", self.external_call, 5)
         self.curr_pose_pub = self.create_publisher(PoseStamped, "/panda/curr_pose", 5)
-        
+        self.joint_state_pub = self.create_publisher(JointState, "/joint_states", 5)
+
         self.tf_broadcaster = TransformBroadcaster(self)
         time.sleep(1)
 
@@ -642,7 +646,19 @@ class Panda():
             pos = self.curr_pos
             ori = self.curr_ori_xyzw
             self.curr_pose_pub.publish(PoseStamped(pose=Pose(position=Point(x=pos[0], y=pos[1], z=pos[2]), orientation=Quaternion(x=ori[0], y=ori[1], z=ori[2], w=ori[3]))))
+            self.publish_joint_state()
             time.sleep(0.1)
+
+    def publish_joint_state(self):
+        try:
+            finger = self.grip_value / 2
+            message = JointState(name=JOINT_NAMES,
+                                 position=[*self.curr_joint, finger, finger])
+        except Exception as error:
+            self.get_logger().warning(f"Could not read joint state: {error}")
+            return
+        message.header.stamp = self.get_clock().now().to_msg()
+        self.joint_state_pub.publish(message)
 
     def gripper_state_thread(self):
         while rclpy.ok():
