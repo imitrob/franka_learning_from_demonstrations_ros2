@@ -71,6 +71,8 @@ class CameraFeedback():
         self.cx_cy_array = np.array([camera_info.k[2], camera_info.k[5]])    # Principal point offsets of your camera
 
     def sift_matching(self):
+        if self.curr_image is None or not hasattr(self, "cx_cy_array"):
+            return
 
         # self.resized_img_gray=image_process(self.ds_factor,  0, 1, 0, 1)
         self.resized_img_gray=image_process(self.curr_image, self.ds_factor,  self.row_crop_pct_top , self.row_crop_pct_bot, self.col_crop_pct_left, self.col_crop_pct_right)
@@ -82,6 +84,8 @@ class CameraFeedback():
         # find the keypoints and descriptors with SIFT
         kp1, des1 = sift.detectAndCompute(self.loaded_img[idx], None)
         kp2, des2 = sift.detectAndCompute(self.resized_img_gray, None)
+        if des1 is None or des2 is None:
+            return
 
         FLANN_INDEX_KDTREE = 0
         index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
@@ -90,11 +94,18 @@ class CameraFeedback():
         flann = cv2.FlannBasedMatcher(index_params, search_params)
 
         # find matches by knn which calculates point distance in 128 dim
-        matches = flann.knnMatch(des1, des2, k=2)
+        try:
+            matches = flann.knnMatch(des1, des2, k=2)
+        except cv2.error as e:
+            self.get_logger().warning(f"SIFT matching failed: {e}")
+            return
 
         # store all the good matches as per Lowe's ratio test.
         good_feature = []
-        for m, n in matches:
+        for pair in matches:
+            if len(pair) != 2:
+                continue
+            m, n = pair
             if m.distance < 0.7 * n.distance:
                 good_feature.append(m)
             # translate keypoints back to full source template
@@ -113,7 +124,13 @@ class CameraFeedback():
             self._src_pts = np.float32([kp1[m.queryIdx].pt for m in good_feature]).reshape(-1, 1, 2)
             self._dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_feature]).reshape(-1, 1, 2)
 
-            transform_pixels, inliers = cv2.estimateAffinePartial2D(self._src_pts, self._dst_pts)
+            try:
+                transform_pixels, inliers = cv2.estimateAffinePartial2D(self._src_pts, self._dst_pts)
+            except cv2.error as e:
+                self.get_logger().warning(f"SIFT transform estimation failed: {e}")
+                return
+            if transform_pixels is None:
+                return
             # print("transform", transform_pixels)
             scaling_factor = 1 - np.sqrt(np.linalg.det(transform_pixels[0:2, 0:2]))
 
@@ -122,7 +139,7 @@ class CameraFeedback():
             y_distance = transform_pixels[1, 2]
 
             transform_correction = np.identity(4)
-            
+
             if abs(x_distance) > self.x_dist_threshold:
                 transform_correction[0, 3] = np.sign(x_distance) * self.correction_increment
                 # print("correcting x")
@@ -157,12 +174,16 @@ class CameraFeedback():
                 col_idx_end = int(w * self.col_crop_pct_right)
                 padded_template[row_idx_start:row_idx_end, col_idx_start:col_idx_end] = self.loaded_img[idx]
                 self._annoted_image = cv2.drawMatches(padded_template, kp1, self.resized_img_gray, kp2, good_feature, None, **draw_params)
-                loaded_image_msg = self.bridge.cv2_to_imgmsg(self._annoted_image)
-                self.current_template_pub.publish(loaded_image_msg)  
+                loaded_image_msg = self.bridge.cv2_to_imgmsg(
+                    self._annoted_image, encoding="bgr8"
+                )
+                self.current_template_pub.publish(loaded_image_msg)
             except Exception as e:
                 print(e)
 
-        transform_base_2_cam = self.get_transform_camera()
+        transform_base_2_cam = self.get_transform('panda_link0', 'camera_color_optical_frame')
+        if transform_base_2_cam is None:
+            return
         transform = transform_base_2_cam @ transform_correction @ np.linalg.inv(transform_base_2_cam)
 
         transform[2,3] = 0   # ignore z translation (in final transform/pose in base frame)
@@ -174,7 +195,7 @@ class CameraFeedback():
         marker = Marker()
 
         marker.header.frame_id = "panda_link0"
-        marker.header.stamp = self.get_clock().now()
+        marker.header.stamp = self.get_clock().now().to_msg()
 
         # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
         marker.type = 0
@@ -193,7 +214,7 @@ class CameraFeedback():
         # Set the scale of the marker
         marker.scale.x = 0.005
         marker.scale.y = 0.01
-        marker.scale.z = 0
+        marker.scale.z = 0.0
 
         # Set the color
         marker.color.r = 0.0

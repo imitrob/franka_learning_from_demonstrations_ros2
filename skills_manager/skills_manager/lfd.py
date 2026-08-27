@@ -381,6 +381,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.end = False
         self.pause = False
         self.spiralling_occured = False
+        self.camera_correction.fill(0)
 
         # init pose
         start = PoseStamped()
@@ -415,8 +416,8 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
         self.move_to_pose_with_stampedpose(goal)
 
-        # if self.loaded_img_feedback_flag[0, self.time_index]:
-        #     self.sift_matching()
+        if self.loaded_img_feedback_flag[0, self.time_index]:
+            self.sift_matching()
 
         if self.loaded_spiral_flag[0, self.time_index]:
             if self.force.z > 5:

@@ -1,11 +1,11 @@
 import numpy as np
-import rclpy
 from geometry_msgs.msg import PoseStamped
 import tf2_ros
 import tf_transformations
 from panda_control.pose_transform_functions import orientation_2_quaternion, pose_st_2_transformation, position_2_array, pos_quat_2_pose_st, transformation_2_pose, transform_pose, list_2_quaternion, transform_pos_ori
 
 from rclpy.duration import Duration 
+from rclpy.time import Time
 from tf2_ros.buffer import Buffer
 from geometry_msgs.msg import Point, Quaternion
 
@@ -49,14 +49,20 @@ class Transform():
         return self.final_transform
     
     def get_transform(self, source_frame, target_frame):
-        while True:
-            try:
-                now = self.get_clock().now()
-                self._tf_listener.waitForTransform(source_frame, target_frame, now, Duration(seconds=4.0))
-                rp_tr, rp_rt = self._tf_listener.lookupTransform(source_frame, target_frame, now)
-                break
-            except Exception as e:
-                self.get_logger().warning(e)
+        try:
+            stamped = self.tf_buffer.lookup_transform(
+                source_frame, target_frame, Time(), timeout=Duration(seconds=0)
+            )
+        except tf2_ros.TransformException as e:
+            self.get_logger().warning(
+                f"Transform {source_frame} -> {target_frame} not available: {e}"
+            )
+            return None
+
+        translation = stamped.transform.translation
+        rotation = stamped.transform.rotation
+        rp_tr = [translation.x, translation.y, translation.z]
+        rp_rt = [rotation.x, rotation.y, rotation.z, rotation.w]
         transform = np.dot(tf_transformations.translation_matrix(rp_tr), tf_transformations.quaternion_matrix(rp_rt))
         return transform
 
