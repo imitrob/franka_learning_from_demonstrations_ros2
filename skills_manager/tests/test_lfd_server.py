@@ -112,7 +112,7 @@ def test_recording_name_derives_the_object_and_rejects_missing_object():
 
 def test_server_rejects_unsupported_parameters_and_arities():
     for task in (
-        _task("pick", ["cube"], {"speed": "slow"}),
+        _task("pick", ["cube"], {"action_modifier": "slow"}),
         _task("home"),
         _task("pick", [""]),
         _task("put", ["one", "two", "three"]),
