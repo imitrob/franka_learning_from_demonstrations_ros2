@@ -84,7 +84,10 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         Args:
             roll_reduction_alpha: float. When controlled externally (joystick/gestures), we let roll->0 as the user cannot control it.
         """
-        should_stop = should_stop or (lambda: False)
+        requested_stop = should_stop or (lambda: False)
+        def should_stop():
+            self.check_motion()
+            return requested_stop()
         if signalize:
             self.signalizer.signalize_ready_demonstration()
         if on_phase:
@@ -282,6 +285,42 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
     def update_additional_flags(self):
         pass
 
+    def call_motion_service(self, client, request, *, localizing=False, timeout=30.0):
+        """Wait on ROS without hiding cancellation; localizer poses run on this worker."""
+        self.check_motion()
+        previous = getattr(self, "_localization_future", None)
+        if localizing and previous is not None and not previous.done():
+            raise RuntimeError("Previous localization is still running")
+        deadline = time.monotonic() + timeout
+        with self._motion_lock:
+            self._accept_localizer_goals = localizing
+            self.external_call_msg = None
+        try:
+            future = client.call_async(request)
+            if localizing:
+                self._localization_future = future
+            while True:
+                self.check_motion()
+                if time.monotonic() >= deadline:
+                    self.fail_motion("Robot service timed out")
+                with self._motion_lock:
+                    pose = self.external_call_msg
+                    self.external_call_msg = None
+                if pose is not None:
+                    # Corrections are tracking targets, not permission for a large jump.
+                    self._validate_target(
+                        [pose.pose.position.x, pose.pose.position.y, pose.pose.position.z],
+                        [pose.pose.orientation.x, pose.pose.orientation.y,
+                         pose.pose.orientation.z, pose.pose.orientation.w])
+                    self.go_to_pose_ik_quick(pose)
+                if future.done():
+                    return future.result()
+                self.motion_sleep(0.01)
+        finally:
+            with self._motion_lock:
+                self._accept_localizer_goals = False
+                self.external_call_msg = None
+
     def localize(self, object_template_name: str = ""):
         if object_template_name == "":
             print("No given object_template_name", flush=True)
@@ -289,12 +328,12 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
         if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
             raise Exception("Service not available after waiting")
-        ret = self.set_localizer_client.call(SetTemplate.Request(template_name=object_template_name))
+        ret = self.call_motion_service(self.set_localizer_client, SetTemplate.Request(template_name=object_template_name))
         if not ret.success:
             print("Returned because localizer not succesful", flush=True)
             return False
         self.move_template_start()
-        active = self.active_localizer_client.call(Trigger.Request())
+        active = self.call_motion_service(self.active_localizer_client, Trigger.Request(), localizing=True)
         if active is None or not active.success:
             # The object is not where the template says it is: servoing produced
             # no delta, so the recorded trajectory would run against thin air.
@@ -307,12 +346,12 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         if localize_box:
             if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
                 raise Exception("Service not available after waiting")
-            ret = self.set_localizer_client.call(SetTemplate.Request(template_name=object_template_name))
+            ret = self.call_motion_service(self.set_localizer_client, SetTemplate.Request(template_name=object_template_name))
             if not ret.success:
                 print("Returned because localizer not succesful", flush=True)
                 return
             self.move_template_start()
-            self.active_localizer_client.call(Trigger.Request())
+            self.call_motion_service(self.active_localizer_client, Trigger.Request(), localizing=True)
             self.compute_final_transform()
         try:
             self.load(name_skill)
@@ -407,6 +446,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         return start
 
     def player_step(self):
+        self.check_motion()
         assert self.loaded_traj is not None, "Trajectory not loaded"
 
         quat_goal = list_2_quaternion(self.loaded_ori_wxyz[:, self.time_index])
@@ -415,6 +455,8 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         goal.header.frame_id = 'panda_link0'
 
         self.correct()
+        self._validate_target(position_2_array(goal.pose.position),
+                              [quat_goal.x, quat_goal.y, quat_goal.z, quat_goal.w])
 
         self.gripper_step(self.loaded_gripper[0][self.time_index])
 
@@ -440,7 +482,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         holding = sift_step and not self.sift_converged and self.sift_hold_counter < self.max_sift_hold_steps
         if holding:
             self.sift_hold_counter = self.sift_hold_counter + 1
-        elif pos_2_goal_diff <= self.attractor_distance_threshold:
+        elif self.safety_checker():
             self.sift_hold_counter = 0
             self.sift_converged = True
             self.time_index=self.time_index + 1
@@ -456,7 +498,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
             self.go_to_pose(start) # PoseStamped
             self.time_index = 0
             self.retry_counter = self.retry_counter + 1
-        self.r.sleep()
+        self.motion_sleep(1.0 / self.freq)
 
         # save step sample
         self.recorded_traj = np.c_[self.recorded_traj, self.curr_pos]

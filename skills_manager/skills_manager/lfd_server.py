@@ -22,6 +22,7 @@ from lfd_msgs.srv import (
 )
 from multi_modal_reasoning.skill_command import SkillCommand
 from panda_control.home_pose import HOME_POSE
+from panda_control.panda import MotionCanceled, MotionError
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.duration import Duration
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -44,8 +45,7 @@ RECORD_HEARTBEAT_TIMEOUT = 30.0
 LEASE_TIMEOUT = 30.0
 
 
-class _OperationCanceled(Exception):
-    pass
+_OperationCanceled = MotionCanceled
 
 
 class _OperationTimedOut(Exception):
@@ -204,6 +204,11 @@ class LfDServer(LfD):
                     f"Rejecting {target!r}: robot operation is already active"
                 )
                 return GoalResponse.REJECT
+            try:
+                self.begin_motion()
+            except MotionError as exc:
+                self.get_logger().warning(f"Rejecting {target!r}: {exc}")
+                return GoalResponse.REJECT
             self._operation_mode = mode
             self._operation_id = uuid.uuid4().hex
             self._operation_target = target
@@ -277,6 +282,14 @@ class LfDServer(LfD):
         self._status_pub.publish(message)
 
     def _finish_operation(self, cleanup_error="", outcome="completed"):
+        # The producer has unwound before admission is released.
+        if outcome != "completed":
+            try:
+                self.stop()
+                self.stop_gripper()
+                self.wait_for_hold()
+            except Exception as exc:
+                cleanup_error = cleanup_error or str(exc)
         with self._state_lock:
             stop_error = cleanup_error or self._cancel_error
             deferred = list(self._deferred_stop_goals)
@@ -288,8 +301,8 @@ class LfDServer(LfD):
             self._operation_mode = OperationStatus.IDLE
             self._operation_id = ""
             self._operation_target = ""
-            self._operation_phase = "idle"
-            self._operation_message = ""
+            self._operation_phase = "idle" if not cleanup_error else "failed"
+            self._operation_message = cleanup_error
             self._active_goal = None
             self._active_action_name = ""
             self._recording_id = ""
@@ -315,6 +328,8 @@ class LfDServer(LfD):
         if task.action == STOP_ACTION:
             with self._state_lock:
                 self._stop_inflight += 1
+                if self._operation_mode != OperationStatus.IDLE:
+                    self.stop()
             return GoalResponse.ACCEPT
         return self._reserve_operation(
             OperationStatus.EXECUTING, task.command, EXECUTE_ACTION
@@ -381,99 +396,70 @@ class LfDServer(LfD):
         log(wrapped.result.message)
 
     def _execute_task(self, goal_handle, task):
-        parts = self.parts_for_task(task)
         completed = []
-        task_error = ""
-        canceled = False
         cleanup_error = ""
-        terminal_outcome = "failed"
-
-        self.end = False
-        self._start_inputs()
-        self._queue_signalizer("executing")
+        outcome = "failed"
+        cleaning_up = False
+        result = ExecuteSkill.Result()
         try:
-            self._set_operation_phase("homing")
-            self._publish_feedback(goal_handle, "homing", parts)
-            self._release_home()
-            self._raise_if_canceled(goal_handle)
-
-            self._set_operation_phase("validating")
-            self._validate_parts(goal_handle, parts)
-            self._raise_if_canceled(goal_handle)
-
-            for index, part in enumerate(parts, start=1):
-                if index > 1:
-                    self._set_operation_phase("homing")
-                    self._publish_feedback(
-                        goal_handle, "homing", parts, index=index, part=part
-                    )
-                    self._carry_home()
-                    self._raise_if_canceled(goal_handle)
-
-                self._set_operation_phase("localizing", part.name)
-                self._publish_feedback(
-                    goal_handle, "localizing", parts, index=index, part=part
-                )
-                self._localize_part(part)
-                self._raise_if_canceled(goal_handle)
-
-                self._set_operation_phase("executing", part.name)
-                self._execute_part(goal_handle, parts, index, part)
-                completed.append(part.name)
-                self._raise_if_canceled(goal_handle)
-        except _OperationCanceled as exc:
-            canceled = True
-            task_error = str(exc)
-        except Exception as exc:
-            task_error = str(exc)
-            self.get_logger().error(f"Skill task failed: {exc}")
-            self._set_operation_phase("failed", task_error)
-        finally:
             try:
+                parts = self.parts_for_task(task)
+                self.end = False
+                self._start_inputs()
+                self._queue_signalizer("executing")
+                self._raise_if_canceled(goal_handle)
                 self._set_operation_phase("homing")
                 self._publish_feedback(goal_handle, "homing", parts)
                 self._release_home()
-            except Exception as exc:
-                cleanup_error = str(exc)
-                self.get_logger().error(f"Release-home failed: {exc}")
-            self._stop_inputs()
-            canceled = canceled or goal_handle.is_cancel_requested
-            self._publish_feedback(
-                goal_handle, "idle", parts, progress=1.0 if not task_error else 0.0
-            )
-            self._queue_signalizer("idle")
-
-        result = ExecuteSkill.Result()
-        result.completed_parts = completed
-        try:
-            if cleanup_error:
-                result.message = self._result_message(
-                    task, f"cleanup failed: {cleanup_error}", completed
-                )
-                goal_handle.abort()
-            elif canceled:
-                result.message = self._result_message(
-                    task, task_error or "canceled", completed
-                )
-                goal_handle.canceled()
-                terminal_outcome = "canceled"
-            elif task_error:
-                result.message = self._result_message(task, task_error, completed)
-                goal_handle.abort()
-            else:
+                self._raise_if_canceled(goal_handle)
+                self._set_operation_phase("validating")
+                self._validate_parts(goal_handle, parts)
+                self._raise_if_canceled(goal_handle)
+                for index, part in enumerate(parts, start=1):
+                    if index > 1:
+                        self._set_operation_phase("homing")
+                        self._publish_feedback(goal_handle, "homing", parts, index=index, part=part)
+                        self._carry_home()
+                        self._raise_if_canceled(goal_handle)
+                    self._set_operation_phase("localizing", part.name)
+                    self._publish_feedback(goal_handle, "localizing", parts, index=index, part=part)
+                    self._localize_part(part)
+                    self._raise_if_canceled(goal_handle)
+                    self._set_operation_phase("executing", part.name)
+                    self._execute_part(goal_handle, parts, index, part)
+                    completed.append(part.name)
+                    self._raise_if_canceled(goal_handle)
+                cleaning_up = True
+                self._set_operation_phase("homing")
+                self._publish_feedback(goal_handle, "homing", parts)
+                self._release_home()
+                self._raise_if_canceled(goal_handle)
+                self._publish_feedback(goal_handle, "idle", parts, progress=1.0)
+                goal_handle.succeed()
+                outcome = "completed"
                 result.message = self._result_message(task, "completed", completed)
-                try:
-                    goal_handle.succeed()
-                    terminal_outcome = "completed"
-                except Exception:
-                    if not goal_handle.is_cancel_requested:
-                        raise
-                    result.message = self._result_message(task, "canceled", completed)
+            except Exception as exc:
+                canceled = isinstance(exc, MotionCanceled) or goal_handle.is_cancel_requested
+                if cleaning_up and not canceled:
+                    cleanup_error = str(exc)
+                outcome = "canceled" if canceled else "failed"
+                detail = "canceled" if canceled else (
+                    f"cleanup failed: {exc}" if cleaning_up else f"failed: {exc}")
+                result.message = self._result_message(task, detail, completed)
+                self.get_logger().warning(result.message)
+                self._set_operation_phase(outcome, result.message)
+                # A latched stop can reach here before ROS finishes its cancel transition.
+                if goal_handle.is_cancel_requested:
                     goal_handle.canceled()
-                    terminal_outcome = "canceled"
+                else:
+                    goal_handle.abort()
+            finally:
+                self._stop_inputs()
+                self._queue_signalizer("idle")
+            result.completed_parts = completed
+            return result
         finally:
-            self._finish_operation(cleanup_error, terminal_outcome)
-        return result
+            self._finish_operation(cleanup_error, outcome)
 
     def _execute_stop(self, goal_handle):
         goal_id = self._goal_id(goal_handle)
@@ -517,6 +503,7 @@ class LfDServer(LfD):
         outcome = "failed"
         error = ""
         try:
+            self._raise_if_canceled(goal_handle)
             self._set_operation_phase("homing")
             feedback = HomeRobot.Feedback()
             feedback.phase = "homing"
@@ -534,15 +521,20 @@ class LfDServer(LfD):
             outcome = "completed"
         except _OperationCanceled:
             result.message = "Homing canceled"
-            goal_handle.canceled()
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
             outcome = "canceled"
         except Exception as exc:
             error = str(exc)
             result.message = f"Homing failed: {exc}"
             goal_handle.abort()
         finally:
-            self._queue_signalizer("idle")
-            self._finish_operation(error, outcome)
+            try:
+                self._queue_signalizer("idle")
+            finally:
+                self._finish_operation(error, outcome)
         return result
 
     # --- RecordSkill -----------------------------------------------------
@@ -583,8 +575,9 @@ class LfDServer(LfD):
         saved = ""
 
         self.end = False
-        self._start_inputs()
         try:
+            self._start_inputs()
+            self._raise_if_canceled(goal_handle)
             self._record_feedback(goal_handle, "homing")
             if goal_handle.request.home_before_recording:
                 self.home()
@@ -623,7 +616,10 @@ class LfDServer(LfD):
             return result
         except _OperationCanceled:
             result.message = "Recording canceled; demonstration discarded"
-            goal_handle.canceled()
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
             outcome = "canceled"
         except _OperationTimedOut:
             result.message = "Recording client heartbeat timed out; discarded"
@@ -635,10 +631,12 @@ class LfDServer(LfD):
             self._set_operation_phase("failed", error)
             goal_handle.abort()
         finally:
-            self._stop_inputs()
-            self._restore_normal_stiffness()
-            self._queue_signalizer("idle")
-            self._finish_operation(error, outcome)
+            try:
+                self._stop_inputs()
+                self._restore_normal_stiffness()
+                self._queue_signalizer("idle")
+            finally:
+                self._finish_operation(error, outcome)
         return result
 
     def _finish_recording_early(self, goal_handle, result):
@@ -726,6 +724,7 @@ class LfDServer(LfD):
         outcome = "failed"
         error = ""
         try:
+            self._raise_if_canceled(goal_handle)
             self._reserve_feedback(goal_handle, "homing")
             self.home()
             self.offset_compensator(20)
@@ -750,7 +749,10 @@ class LfDServer(LfD):
             outcome = "completed"
         except _OperationCanceled:
             result.message = "Template reservation canceled"
-            goal_handle.canceled()
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
             outcome = "canceled"
         except _OperationTimedOut:
             result.message = "Template reservation timed out"
@@ -761,8 +763,10 @@ class LfDServer(LfD):
             result.message = f"Template reservation failed: {exc}"
             goal_handle.abort()
         finally:
-            self._queue_signalizer("idle")
-            self._finish_operation(error, outcome)
+            try:
+                self._queue_signalizer("idle")
+            finally:
+                self._finish_operation(error, outcome)
         return result
 
     def _reserve_feedback(self, goal_handle, phase):
@@ -824,8 +828,8 @@ class LfDServer(LfD):
     def _validate_template(self, template):
         if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
             raise RuntimeError("set_localizer service is unavailable")
-        response = self.set_localizer_client.call(
-            SetTemplate.Request(template_name=template)
+        response = self.call_motion_service(
+            self.set_localizer_client, SetTemplate.Request(template_name=template)
         )
         if response is None or not response.success:
             raise ValueError(f"localization template {template!r} is unavailable")
@@ -881,6 +885,7 @@ class LfDServer(LfD):
         return SkillCommand.from_json(request.skill_command_json)
 
     def _raise_if_canceled(self, goal_handle):
+        self.check_motion()
         if not goal_handle.is_cancel_requested:
             return
         try:

@@ -75,7 +75,8 @@ def get_remote_parameters(node, param_names: List[str], server="parameter_tester
         request = GetParameters.Request()
         request.names = param_names  # Pass the list of parameter names
 
-        future = client.call(request)
+        future = (node.call_motion_service(client, request)
+                  if hasattr(node, "_motion_lock") else client.call(request))
         
         # THIS WAS CHANGED, IT EXTRACTS THE PARAMETER VALUES DIRECTLY!
         # return future.result()

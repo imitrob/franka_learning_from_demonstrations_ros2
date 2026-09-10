@@ -6,6 +6,7 @@ from typing import Iterable, Tuple, List
 from copy import deepcopy
 
 from skills_manager.lfd import LfD
+from panda_control.panda import robot_operation, MotionError
 from skills_manager.risk_aware_lfd.risk_policy import *
 from skills_manager.feedback import RiskAwareFeedback
 import trajectory_data
@@ -41,6 +42,11 @@ class Request():
 
 
 class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
+    # Guard direct notebook calls as well as widget callbacks. Nested calls share ownership.
+    home = robot_operation(LfD.home)
+    traj_rec = robot_operation(LfD.traj_rec)
+    move_template_start = robot_operation(LfD.move_template_start)
+
 
     def __init__(self, estimator_risk_policy: str = 'ContinueRiskPolicy', risk_patience: int = 2,
                  save_ds_window: bool = False):
@@ -91,6 +97,7 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
         warned = False
         while rclpy.ok() and not self.end and \
                 not self.retrain_client.wait_for_service(timeout_sec=1.0):
+            self.check_motion()
             if not warned:
                 print("switcher not available",flush=True)
                 print("Run switcher: ros2 run nocode_robot_programming switcher",flush=True)
@@ -106,7 +113,7 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
         try:
             # Manual spin loop so we can check our own conditions
             while rclpy.ok() and not future.done() and not self.end:
-                time.sleep(0.1)
+                self.motion_sleep(0.1)
 
             # If we’re here because our end flag is set:
             if self.end:
@@ -173,6 +180,7 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
     #         torch.tensor(frame_number, dtype=torch.float32).cuda() # 5. Frame number normalized (0-1)
     #     ]
 
+    @robot_operation
     def play_skill(self, name_skill, object_template_name, localize_box=True) -> List[Request]:
         
         self.request_log = []
@@ -181,16 +189,8 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
             print("Skill doesn't exist! returning")
             return []
 
-        if localize_box:
-            if not self.set_localizer_client.wait_for_service(timeout_sec=5.0):
-                raise Exception("Service not available after waiting")
-            ret = self.set_localizer_client.call(SetTemplate.Request(template_name=object_template_name))
-            if not ret.success:
-                print("Returned because localizer not succesful", flush=True)
-                return []
-            self.move_template_start()
-            self.active_localizer_client.call(Trigger.Request())
-            self.compute_final_transform() 
+        if localize_box and self.localize(object_template_name) is False:
+            raise MotionError("Localization failed")
 
         # Track trials saved by this run so the last play can be undone
         self.last_saved_trial_names = saved_trial_exec_names = []
@@ -255,6 +255,7 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
             print("Keyboard interrupted", flush=True)
         return self.request_log
 
+    @robot_operation
     def execute(self) -> Request:
         ''' Has trajectory at self.loaded_traj, self.loaded_ori
         '''
@@ -265,8 +266,9 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
         self.recorded_novelty_flag = np.array([0])
 
         while (time.time() - self.last_target_state) > EXPECTED_TARGET_STATE_PUB_FREQ:
+            self.check_motion()
             print("waiting for target state", flush=True)
-            time.sleep(1.0)
+            self.motion_sleep(1.0)
             self.pub_rec_image()
             if self.end:
                 break
@@ -278,7 +280,7 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
                 vel = 0
                 init_pos = deepcopy(self.curr_pos)
                 while(self.pause):
-                    self.r.sleep()
+                    self.motion_sleep(1.0 / self.freq)
                     
                     if self.end or not rclpy.ok(): # user take control
                         save_name = Filename(self.filename_obj.task, 

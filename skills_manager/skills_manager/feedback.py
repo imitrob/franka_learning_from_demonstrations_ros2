@@ -286,6 +286,10 @@ class Feedback(FrankaConnector, KeyboardConnector, JoystickConnector, Teleoperat
     def keyboard_on_press(self, key):
         # self.get_logger().info(f"Event happened, user pressed {key}")
         # This function runs on the background and checks if a keyboard key was pressed
+        if key == Key.esc and self._robot is not None:
+            self._robot.stop()
+            self._robot.stop_gripper()
+            return
         if key == KeyCode.from_char('e'):
             self.end += 1
         # Feedback for translate forward/backward

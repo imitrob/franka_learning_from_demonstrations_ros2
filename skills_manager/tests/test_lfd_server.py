@@ -4,6 +4,8 @@ import threading
 from types import SimpleNamespace
 
 import numpy as np
+from unittest.mock import patch
+from panda_control.panda import Panda, MotionError
 
 os.environ.setdefault("PYNPUT_BACKEND", "dummy")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl-lfd-server-tests")
@@ -30,6 +32,8 @@ class _Logger:
 
 class _AdmissionServer(LfDServer):
     def __init__(self):
+        self._init_motion_state()
+        self._controller_ready.set()
         self._state_lock = threading.Lock()
         self._operation_mode = OperationStatus.IDLE
         self._operation_id = ""
@@ -56,6 +60,13 @@ class _AdmissionServer(LfDServer):
 
     def _request_active_cancel(self):
         self.cancel_requests += 1
+
+    def stop(self):
+        Panda.stop(self)
+        self._hold_done.set()
+
+    def stop_gripper(self):
+        pass
 
     def get_parameter(self, _name):
         return SimpleNamespace(value=30.0)
@@ -156,11 +167,17 @@ class _Goal:
 
 class _ExecutionServer(LfDServer):
     def __init__(self):
+        self._init_motion_state()
+        self._controller_ready.set()
         self.events = []
         self._signalizer_states = queue.SimpleQueue()
 
     def get_logger(self):
         return _Logger()
+
+    def check_motion(self):
+        with patch("panda_control.panda.rclpy.ok", return_value=True):
+            super().check_motion()
 
     def _queue_signalizer(self, state):
         self.events.append(("signal", state))
@@ -254,7 +271,7 @@ class _CancelExecutionServer(_ExecutionServer):
         self._raise_if_canceled(goal)
 
 
-def test_cancel_stops_the_whole_task_and_still_release_homes():
+def test_cancel_stops_the_whole_task_without_release_homing():
     server = _CancelExecutionServer()
     goal = _Goal()
 
@@ -265,7 +282,7 @@ def test_cancel_stops_the_whole_task_and_still_release_homes():
     assert ("execute", "put2__bowl") not in server.events
     assert ("stop",) in server.events
     assert ("stop_gripper",) in server.events
-    assert server.events.count(("release_home",)) == 2
+    assert server.events.count(("release_home",)) == 1
     assert server.events[-1] == ("finish", "", "canceled")
 
 
@@ -346,3 +363,32 @@ def test_release_home_checks_position_and_orientation():
 
     assert at_home.events == ["open"]
     assert wrong_orientation.events == ["open", "home"]
+
+
+def test_setup_failure_always_finishes_operation():
+    server = _ExecutionServer()
+    goal = _Goal()
+    with patch.object(server, "_start_inputs", side_effect=RuntimeError("input failed")):
+        result = server._execute_task(goal, _task("pick", ["cube"]))
+    assert goal.status == "aborted"
+    assert "input failed" in result.message
+    assert ("release_home",) not in server.events
+    assert server.events[-1] == ("finish", "", "failed")
+
+
+def test_unacknowledged_stop_rejects_new_motion_but_accepts_stop():
+    server = _AdmissionServer()
+    Panda.stop(server)
+    assert server._execute_goal_callback(_request(_task("pick", ["cube"]))) == GoalResponse.REJECT
+    assert server._execute_goal_callback(_request(_task("stop"))) == GoalResponse.ACCEPT
+
+
+def test_failed_operation_releases_admission_for_next_command():
+    server = _AdmissionServer()
+    request = _request(_task("pick", ["cube"]))
+    assert server._execute_goal_callback(request) == GoalResponse.ACCEPT
+    server._motion_fault = "Tracking timed out"
+    server._finish_operation(outcome="failed")
+    assert server._execute_goal_callback(request) == GoalResponse.ACCEPT
+    assert not server._motion_cancel.is_set()
+    assert server._motion_fault == ""

@@ -7,6 +7,9 @@ from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
 import rclpy
 import threading
+import fcntl
+from contextlib import contextmanager
+from functools import wraps
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32MultiArray
@@ -37,7 +40,9 @@ UPDATE_THREAD_INTERVAL = 1.0 # s
 TF_BROADCAST_INTERVAL = 0.01 # s
 OPEN_GRIPPER_WIDTH = 0.06 # How much gripper opens [m]
 HIGH_POINT_DIFFERENCE = 0.1 # m
-HIGH_ORI_DIFFERENCE = 0.01
+HIGH_ORI_DIFFERENCE = 0.1  # radians; tracking tolerance is half this limit
+TRACKING_TIMEOUT = 5.0  # seconds without reaching the current waypoint
+STOP_TIMEOUT = 2.0  # controller acknowledgement deadline
 JOINT_NAMES = [f"panda_joint{i}" for i in range(1, 8)] + [
     "panda_finger_joint1", "panda_finger_joint2"]
 
@@ -65,6 +70,22 @@ LOAD_INERTIA = [0.001, 0.0, 0.0,
                 0.0, 0.0, 0.0017]  # kg*m^2, row-major 3x3
 LOAD_MASS = False
 
+class MotionCanceled(RuntimeError):
+    pass
+
+
+class MotionError(RuntimeError):
+    pass
+
+
+def robot_operation(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        with self.robot_operation():
+            return method(self, *args, **kwargs)
+    return run
+
+
 class Panda():
     def __init__(self,
                  K_pos: int = 1000, # Default Positional stiffness
@@ -72,6 +93,14 @@ class Panda():
                  K_ns: int = 0, # Default Nullspace stiffness
                  ):
         super(Panda, self).__init__()
+        # ponytail: local Linux process ownership; remote clients must use the server.
+        self._owner_file = open(f"/tmp/franka-{HOSTNAME}.lock", "a")
+        try:
+            fcntl.flock(self._owner_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self._owner_file.close()
+            raise RuntimeError("Robot already owned by another demo process") from None
+        self._init_motion_state()
         self.K_pos = K_pos
         self.K_ori = K_ori
         self.K_ns= K_ns
@@ -136,7 +165,81 @@ class Panda():
 
         self.external_call_msg = None
 
-        self.go_home_flag = False
+
+    def _init_motion_state(self):
+        self._motion_lock = threading.RLock()
+        self._operation_lock = threading.RLock()
+        self._operation_depth = 0
+        self._motion_cancel = threading.Event()
+        self._hold_done = threading.Event()
+        self._controller_ready = threading.Event()
+        self._motion_fault = ""
+        self._tracking_since = None
+        self._accept_localizer_goals = False
+        self.external_call_msg = None
+        self.tracking_timeout = TRACKING_TIMEOUT
+
+    def begin_motion(self):
+        with self._motion_lock:
+            if not self._controller_ready.is_set():
+                raise MotionError("Controller unavailable")
+            if self._motion_cancel.is_set() and not self._hold_done.is_set():
+                raise MotionError("Controller has not acknowledged stop")
+            self._motion_fault = ""
+            self._motion_cancel.clear()
+            self._tracking_since = None
+
+    @contextmanager
+    def robot_operation(self):
+        if not self._operation_lock.acquire(blocking=False):
+            raise MotionError("Robot operation is already active")
+        outer = self._operation_depth == 0
+        try:
+            if outer:
+                self.begin_motion()
+            self._operation_depth += 1
+            try:
+                yield
+            except BaseException:
+                if outer:
+                    self.stop()
+                    self.stop_gripper()
+                    self.wait_for_hold()
+                raise
+            finally:
+                self._operation_depth -= 1
+        finally:
+            self._operation_lock.release()
+
+    def check_motion(self):
+        if self._motion_fault:
+            raise MotionError(self._motion_fault)
+        if self._motion_cancel.is_set() or not rclpy.ok():
+            raise MotionCanceled("Motion canceled")
+
+    def motion_sleep(self, seconds):
+        self._motion_cancel.wait(seconds)
+        self.check_motion()
+
+    def fail_motion(self, reason):
+        with self._motion_lock:
+            self._motion_fault = reason
+            self.stop()
+        raise MotionError(reason)
+
+    def wait_for_hold(self):
+        if not self._hold_done.wait(STOP_TIMEOUT):
+            raise MotionError("Controller has not acknowledged stop; robot unavailable")
+
+    def check_tracking(self, reached):
+        self.check_motion()
+        if reached:
+            self._tracking_since = None
+        elif self._tracking_since is None:
+            self._tracking_since = time.monotonic()
+        elif time.monotonic() - self._tracking_since >= self.tracking_timeout:
+            self.fail_motion("Tracking timed out")
+        return reached
 
     def has_realtime_kernel(self):
         return panda_py.libfranka.has_realtime_kernel()
@@ -150,18 +253,12 @@ class Panda():
     def is_open(self):
         return not self.gripper_state.is_grasped
         
-    def external_call_handler(self): 
-        # if receives a target pose from topic, it goes there by linear motion
-        while rclpy.ok():
-            time.sleep(0.1)
-            if self.external_call_msg is not None:
-                pose = deepcopy(self.external_call_msg)
-                self.external_call_msg = None
-                self.go_to_pose_ik_quick(pose) # PoseStamped
-
     def external_call(self, msg):
-        self.external_call_msg = msg
-        # self.move_to_pose_with_stampedpose(msg) # old without linear motion
+        with self._motion_lock:
+            if self._accept_localizer_goals and not self._motion_cancel.is_set():
+                self.external_call_msg = deepcopy(msg)
+            else:
+                self.get_logger().warning("Pose rejected: no active localization operation")
 
     def move_to_pose_with_stampedpose(self, pose: PoseStamped):
         self.move_to_pose(
@@ -184,6 +281,7 @@ class Panda():
         self.move_gripper(self.grip_open_width)
 
     def grasp_gripper(self, width):
+        self.check_motion()
         self.gripper.stop()
         self.gripper.grasp(width=width, speed=0.05, force=50, epsilon_inner=0.055, epsilon_outer=0.055)
 
@@ -191,13 +289,8 @@ class Panda():
              height=HOME_POSE.position[2],
              front_offset=HOME_POSE.position[0],
              side_offset=HOME_POSE.position[1]):
-        # go to joint target joints of home position
-        self.restart_control(do_homing=True)
-        # redundant:
-        # go to position [0.4,0.0,0.4]
-        self.move_to_pose_with_stampedpose(self.curr_pose)
-        self.set_stiffness(self.K_pos, self.K_pos, self.K_pos, self.K_ori, self.K_ori, self.K_ori, 0)
-
+        self.check_motion()
+        # Cartesian interpolation keeps homing interruptible, including large rotations.
         pos_array = np.array([front_offset, side_offset, height])
         quat = quaternion.quaternion(*HOME_POSE.orientation_wxyz)
         goal = pos_quat_2_pose_st(pos_array, quat)
@@ -218,7 +311,13 @@ class Panda():
               f"orientation error: {math.degrees(ang_err):.1f} deg", flush=True)
 
     def stop(self):
-        self.goal_position = None
+        with self._motion_lock:
+            if not self._motion_cancel.is_set():
+                self._hold_done.clear()
+            self._motion_cancel.set()
+            self.goal_position = None
+            self.goal_orientation = None
+            self.external_call_msg = None
 
     def home_gripper(self):
         self.gripper.homing()
@@ -259,9 +358,9 @@ class Panda():
         for pose in poses:
             
             self.move_to_pose_with_stampedpose(pose)
-            r.sleep()
+            self.motion_sleep(0.01)
         self.move_to_pose_with_stampedpose(goal_pose)    
-        time.sleep(0.2)
+        self.motion_sleep(0.2)
     
         # control robot to desired goal position
 
@@ -292,7 +391,7 @@ class Panda():
                               goal_pose.pose.orientation.x,
                               goal_pose.pose.orientation.y,
                               goal_pose.pose.orientation.z])
-        max_ori_step = math.radians(10.0)  # cap orientation change per step (~10 deg)
+        max_ori_step = HIGH_ORI_DIFFERENCE / 4  # leave room for tracking lag
         step_num_ori = max(1, math.ceil(q_angle(q_start_wxyz, q_goal_wxyz) / max_ori_step))
         if goal_configuration is None:
             quaternion_array = np.array([goal_pose.pose.orientation.w, goal_pose.pose.orientation.x, goal_pose.pose.orientation.y, goal_pose.pose.orientation.z]) 
@@ -339,16 +438,16 @@ class Panda():
                 pose_goal = pos_quat_2_pose_st(pos_goal[i], quaternion.quaternion(qw, qx, qy, qz))
                 self.move_to_pose_with_stampedpose(pose_goal)
                 self.set_configuration(joint_goal[i])
-                if self.safety_check:
+                if self.safety_checker():
                     i= i+1
 
                 # r.sleep()
                 # Per-step dwell paces the whole motion: larger = slower & gentler,
                 # which avoids reflex errors on bigger pose changes.
-                time.sleep(0.01)
+                self.motion_sleep(0.01)
             
         else:
-            print("No feasible joint configuration found or no joint configuration provided", flush=True)        
+            self.fail_motion("No feasible joint configuration found")
 
     def go_to_pose_ik(self, goal_pose: PoseStamped, goal_configuration=None,
                     interp_dist=0.002, interp_dist_joint=0.008,
@@ -382,8 +481,7 @@ class Panda():
             if not sol.success:
                 sol = robot.ikine_LM(T)
             if not sol.success:
-                print("No feasible joint configuration found or no joint configuration provided", flush=True)
-                return
+                self.fail_motion("No feasible joint configuration found")
             goal_configuration = np.asarray(sol.q, dtype=float)
         else:
             goal_configuration = np.asarray(goal_configuration, dtype=float)
@@ -398,11 +496,11 @@ class Panda():
         step_jnt = max(1, int(math.ceil(max_joint / interp_dist_joint)))       # ~0.08 rad
 
         # Orientation (allow large steps)
-        max_ori_step = math.radians(10.0)  # ~10 deg/step
+        max_ori_step = HIGH_ORI_DIFFERENCE / 4  # leave room for tracking lag
         ori_dist = q_angle(q_start_wxyz, q_goal_wxyz)
         step_ori = max(1, int(math.ceil(ori_dist / max_ori_step)))
 
-        step_num = int(min(max(step_lin, step_jnt, step_ori), 120)) + 1
+        step_num = int(max(step_lin, step_jnt, step_ori)) + 1
 
         # Build sequences
         pos_seq   = np.vstack([np.linspace(s, g, step_num) for s, g in zip(pos_start, goal_xyz)]).T
@@ -414,18 +512,18 @@ class Panda():
             pose_goal = pos_quat_2_pose_st(pos_seq[i], quaternion.quaternion(qw, qx, qy, qz))
             self.move_to_pose_with_stampedpose(pose_goal)
 
-            time.sleep(dt)
-            if self.safety_check:
+            self.motion_sleep(dt)
+            if self.safety_checker():
                 i += 1
 
         # ---------- brief, capped orientation refinement (<= 0.3s) ----------
         # Only if needed; bigger step for speed, small cap on duration.
         def refine_quat(max_time_s=0.30):
-            start_t = time.time()
+            start_t = time.monotonic()
             ang_tol  = math.radians(0.6)   # ~0.6°
-            max_step = math.radians(3.0)   # up to 3° per correction
+            max_step = HIGH_ORI_DIFFERENCE / 4
             gamma    = 0.6                 # aggressive correction
-            while (time.time() - start_t) < max_time_s:
+            while (time.monotonic() - start_t) < max_time_s:
                 q_curr = q_norm([self.curr_pose.pose.orientation.w,
                                 self.curr_pose.pose.orientation.x,
                                 self.curr_pose.pose.orientation.y,
@@ -436,23 +534,22 @@ class Panda():
                 frac = min(gamma, max_step / max(ang_err, 1e-6))
                 q_next = q_slerp(q_curr, q_goal_wxyz, frac)
                 self.move_to_pose_with_stampedpose(pos_quat_2_pose_st(goal_xyz, quaternion.quaternion(*q_next)))
-                time.sleep(0.006)
+                self.motion_sleep(0.006)
 
         if ori_dist > math.radians(0.3):  # skip if orientation change was tiny
             refine_quat(max_time_s=0.30)
 
         # Final exact goal (cheap) and short settle
         self.move_to_pose_with_stampedpose(goal_pose)
-        time.sleep(0.15)
+        self.motion_sleep(0.15)
 
     def safety_checker(self):
-        distance_pos = np.linalg.norm(self.curr_pos_goal - self.curr_pos)
-        if distance_pos < self.attractor_distance_threshold:
-            self.safety_check = True
-        else:
-            self.get_logger().warning(f"Safety has been violated with distance {distance_pos}")
-            self.safety_check = False
-
+        distance = np.linalg.norm(self.curr_pos_goal - self.curr_pos)
+        angle = q_angle(q_norm(self.curr_ori_goal_wxyz), q_norm(self.curr_ori_wxyz))
+        self.safety_check = self.check_tracking(
+            distance <= self.attractor_distance_threshold and angle <= HIGH_ORI_DIFFERENCE / 2
+        )
+        return self.safety_check
 
     def offset_compensator(self, steps):
         curr_quat_desired= list_2_quaternion(np.copy(self.curr_ori_goal_wxyz))
@@ -472,7 +569,7 @@ class Panda():
             
             goal_pose = pos_quat_2_pose_st(goal_pos, quat_goal_new)
             self.move_to_pose_with_stampedpose(goal_pose) 
-            time.sleep(0.2)
+            self.motion_sleep(0.2)
             
 
     def broadcast_transform(self):
@@ -505,77 +602,104 @@ class Panda():
         self.tf_broadcaster.sendTransform(transform_stamped)
         # self.get_logger().info(f"Published transform from 'panda_link0' to 'panda_hand'")
 
-    def restart_control(self, do_homing = False):
-        if do_homing:
-            self.go_home_flag = True
-            timeout = 10 # s (timeout with homeing)
-        else:
-            timeout = 2 # s (timeout just restart)
-
+    def restart_control(self):
+        self.check_motion()
         self.break_control_done.clear()
         self.break_control_requested.set()
-        if not self.break_control_done.wait(timeout=timeout):
-            raise Exception("Restart request not finished in time!")
+        deadline = time.monotonic() + STOP_TIMEOUT
+        while not self.break_control_done.wait(0.01):
+            self.check_motion()
+            if time.monotonic() >= deadline:
+                self.fail_motion("Controller restart timed out")
+        self.check_motion()
+
+    def _control_step(self, ctrl):
+        # Publishing and stop share this lock: no late waypoint can undo a stop.
+        with self._motion_lock:
+            if self._motion_cancel.is_set():
+                if not self._hold_done.is_set():
+                    ctrl.set_control(self.curr_pos, self.curr_ori_xyzw)
+                    ctrl.set_impedance(np.diag([self.K_pos] * 3 + [self.K_ori] * 3))
+                    self._hold_done.set()
+                return
+            if self.goal_position is None or self.goal_orientation is None:
+                return
+            try:
+                self._validate_target(self.goal_position, self.goal_orientation)
+            except MotionError:
+                self._control_step(ctrl)  # service the newly latched hold
+                return
+            ctrl.set_control(self.goal_position, self.goal_orientation)
 
     def ctrl_node(self, frequency=500):
-        while True:
-            if self.go_home_flag:
-                # self.panda.move_to_start()
-                self.panda.move_to_joint_position(waypoints=[[0.0, -0.5, 0.0, -2.38, 0.0, 1.89, 0.8]])
-                self.go_home_flag = False
-            ctrl = controllers.CartesianImpedance(filter_coeff=0.05, impedance=np.diag([self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z]), nullspace_stiffness=self.nullspace_stiffness, damping_ratio=0.3)
-            # print("New ctrl:", self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z)
-            self.panda.start_controller(ctrl)
+        while rclpy.ok():
             try:
+                ctrl = controllers.CartesianImpedance(
+                    filter_coeff=0.05,
+                    impedance=np.diag([self.translational_stiffness_X, self.translational_stiffness_Y,
+                                       self.translational_stiffness_Z, self.rotational_stiffness_X,
+                                       self.rotational_stiffness_Y, self.rotational_stiffness_Z]),
+                    nullspace_stiffness=self.nullspace_stiffness, damping_ratio=0.3)
+                self.panda.start_controller(ctrl)
                 with self.panda.create_context(frequency=frequency, max_runtime=999) as ctx:
+                    # A restarted controller must acknowledge the hold itself.
+                    self._hold_done.clear()
+                    self._control_step(ctrl)
+                    self._controller_ready.set()
                     self.break_control_done.set()
-                    while ctx.ok():
-                        if (self.goal_position is not None) and (self.goal_orientation is not None) and (self.curr_ori_xyzw is not None):
-                            if (np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos)) > HIGH_POINT_DIFFERENCE) or \
-                                min_angle_condition(self.goal_orientation, self.curr_ori_xyzw) > HIGH_ORI_DIFFERENCE:
-                                
-                                self.get_logger().warning(f"contror high set point difference {np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos))}  {min_angle_condition(self.goal_orientation, self.curr_ori_xyzw) > HIGH_ORI_DIFFERENCE}")
-
-                                # direction = (np.array(self.goal_position) - np.array(self.curr_pos)) / np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos))
-                                # new_goal_position = self.curr_pos + direction * HIGH_POINT_DIFFERENCE * 0.5
-                                
-                                # new_goal_orientation = step_slerp(
-                                #     self.goal_orientation,
-                                #     self.curr_ori_xyzw, 
-                                #     HIGH_ORI_DIFFERENCE * 0.5,
-                                # )
-
-                                # self.get_logger().warning(f"{self.curr_pos}, {self.curr_ori_xyzw}, || , {new_goal_position}, {new_goal_orientation}")
-
-                                # ctrl.set_control(new_goal_position, new_goal_orientation)
-                                time.sleep(0.001) # Needed! Enforce consistent rate on non rt PC                        
-                                continue
-
-                        if (self.goal_position is not None) and (self.goal_orientation is not None):
-                            ctrl.set_control(self.goal_position, self.goal_orientation)
-                        time.sleep(0.001) # Needed! Enforce consistent rate on non rt PC
-                        # if self.break_control_requested:
-                        if self.break_control_requested.wait(timeout = 0.001):
+                    while ctx.ok() and rclpy.ok():
+                        if self.break_control_requested.is_set():
                             self.break_control_requested.clear()
-                            # print("Restarting control")
-                            self.panda.stop_controller()
                             break
-            except RuntimeError as e:
-                print(f"Recovering from libfranka exception: {str(e)}", flush=True)
+                        self._control_step(ctrl)
+                        time.sleep(0.001)
+            except Exception as exc:
+                with self._motion_lock:
+                    self._motion_fault = f"Controller failed: {exc}"
+                    self.stop()
+                self.get_logger().error(self._motion_fault)
+                time.sleep(0.1)
+            finally:
+                self._controller_ready.clear()
+                try:
+                    self.panda.stop_controller()
+                except Exception as exc:
+                    self._motion_fault = f"Could not stop controller: {exc}"
+                    self.stop()
+                    self.get_logger().error(self._motion_fault)
+                    return
 
-    def move_to_pose(self, 
-                     position: Iterable[float], # xyz
-                     orientation: Iterable[float], # xyzw 
-                     speed_factor: float,
-                    ):
-        self.goal_position = tuple(position)
-        self.goal_orientation = tuple(orientation)
-        self.goal_q_nullspace = None        
+    def _validate_target(self, position, orientation):
+        position = np.asarray(position, dtype=float)
+        orientation = np.asarray(orientation, dtype=float)
+        if (position.shape != (3,) or orientation.shape != (4,)
+                or not np.all(np.isfinite(position)) or not np.all(np.isfinite(orientation))
+                or np.linalg.norm(orientation) == 0):
+            self.fail_motion("Invalid target pose")
+        distance = float(np.linalg.norm(position - self.curr_pos))
+        try:
+            angle = min_angle_condition(orientation, self.curr_ori_xyzw)
+        except ValueError as exc:
+            self.fail_motion(str(exc))
+        if not np.isfinite(distance) or not np.isfinite(angle):
+            self.fail_motion("Invalid robot pose")
+        if distance > HIGH_POINT_DIFFERENCE or angle > HIGH_ORI_DIFFERENCE:
+            self.fail_motion(f"Tracking limit exceeded: position={distance:.4f} m, orientation={angle:.4f} rad")
+
+    def move_to_pose(self, position: Iterable[float], orientation: Iterable[float], speed_factor: float):
+        with self._motion_lock:
+            self.check_motion()
+            self._validate_target(position, orientation)
+            self.goal_position = tuple(position)
+            self.goal_orientation = tuple(np.asarray(orientation) / np.linalg.norm(orientation))
+            self.goal_q_nullspace = None
 
     def grasp(self, *args, **kwargs):
+        self.check_motion()
         self.gripper.grasp(*args, **kwargs)
 
     def move(self, *args, **kwargs):
+        self.check_motion()
         self.gripper.move(*args, **kwargs)
 
     @property
@@ -668,6 +792,8 @@ class Panda():
     def start(self):
         ctrl_thread = threading.Thread(target=self.ctrl_node, daemon=True)
         ctrl_thread.start()
+        if not self._controller_ready.wait(10.0):
+            raise MotionError("Controller did not start")
         if not DIRECT_STIFFNESS_OPTION:
             updateparam_thread = threading.Thread(target=self.update_params_thread, daemon=True)
             updateparam_thread.start()
@@ -675,8 +801,6 @@ class Panda():
         broadcast_transform_thread.start()
         feedback_thread = threading.Thread(target=self.feedback_thread, daemon=True)
         feedback_thread.start()
-        external_call_handler = threading.Thread(target=self.external_call_handler, daemon=True)
-        external_call_handler.start()
         self.gripper_state = self.gripper.read_once() # Initialize gripper state
         gripper_read_thread = threading.Thread(target=self.gripper_state_thread, daemon=True)
         gripper_read_thread.start()
