@@ -382,6 +382,10 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.pause = False
         self.spiralling_occured = False
         self.camera_correction.fill(0)
+        self.sift_hold_counter = 0
+        self.sift_converged = True
+        self._sift_errors.clear()
+        self._last_sift_pos = None
 
         # init pose
         start = PoseStamped()
@@ -416,7 +420,8 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
         self.move_to_pose_with_stampedpose(goal)
 
-        if self.loaded_img_feedback_flag[0, self.time_index]:
+        sift_step = bool(self.loaded_img_feedback_flag[0, self.time_index])
+        if sift_step:
             self.sift_matching()
 
         if self.loaded_spiral_flag[0, self.time_index]:
@@ -430,7 +435,14 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         goal_pos_array = position_2_array(goal.pose.position)
         pos_2_goal_diff = np.linalg.norm(self.curr_pos-goal_pos_array)
 
-        if pos_2_goal_diff <= self.attractor_distance_threshold:
+        # Hold a camera-feedback step until SIFT has closed the image error; otherwise the
+        # trajectory walks on after a single small correction and never converges.
+        holding = sift_step and not self.sift_converged and self.sift_hold_counter < self.max_sift_hold_steps
+        if holding:
+            self.sift_hold_counter = self.sift_hold_counter + 1
+        elif pos_2_goal_diff <= self.attractor_distance_threshold:
+            self.sift_hold_counter = 0
+            self.sift_converged = True
             self.time_index=self.time_index + 1
 
         force_xy_plane = np.sqrt(self.force.x ** 2 + self.force.y ** 2)

@@ -631,6 +631,7 @@ class LfDServer(LfD):
         except Exception as exc:
             error = str(exc)
             result.message = f"Recording failed: {exc}"
+            self.get_logger().error(f"Recording failed:\n{traceback.format_exc()}")
             self._set_operation_phase("failed", error)
             goal_handle.abort()
         finally:

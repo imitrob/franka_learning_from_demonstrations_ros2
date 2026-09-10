@@ -45,7 +45,22 @@ class CameraFeedback():
         self.y_dist_threshold = 2
 
         self.num_good_matches_threshold = 6
-        self.correction_increment = 0.0005
+        self.correction_gain = 0.001         # metres of correction per pixel of (downsampled) image error
+        self.max_correction_step = 0.005     # metres, clamp on a single correction step
+        self.correction_increment = 0.0005   # metres, fixed step still used for the scale (z) correction
+
+        # Hold a flagged timestep until the image error is corrected instead of moving on with it.
+        self.max_sift_hold_steps = 50
+        self.sift_hold_counter = 0
+        self.sift_converged = True
+
+        # A correction is applied from the median of a full measurement window and only once the
+        # arm has settled on the previous one. Correcting every frame while the arm is still
+        # moving feeds the lag back into the accumulator and the pose oscillates.
+        self.sift_window = 5             # measurements per applied correction
+        self.settle_tolerance = 0.002    # m, motion between two measurements that counts as settled
+        self._sift_errors = []
+        self._last_sift_pos = None
         self.camera_param_sub=self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self.camera_info_callback, 5)
 
         self.marker_pub = self.create_publisher(Marker, "/visualization_marker", 2)
@@ -120,6 +135,7 @@ class CameraFeedback():
 
         transform_correction = np.eye(4)
         transform_pixels = np.eye(2)
+        apply_correction = False
         if len(good_feature) > self.num_good_matches_threshold:
             self._src_pts = np.float32([kp1[m.queryIdx].pt for m in good_feature]).reshape(-1, 1, 2)
             self._dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_feature]).reshape(-1, 1, 2)
@@ -129,27 +145,58 @@ class CameraFeedback():
             except cv2.error as e:
                 self.get_logger().warning(f"SIFT transform estimation failed: {e}")
                 return
-            if transform_pixels is None:
-                return
-            # print("transform", transform_pixels)
-            scaling_factor = 1 - np.sqrt(np.linalg.det(transform_pixels[0:2, 0:2]))
+            num_inliers = 0 if inliers is None else int(np.count_nonzero(inliers))
+            if transform_pixels is not None:
+                # print("transform", transform_pixels)
+                scaling_factor = 1 - np.sqrt(np.linalg.det(transform_pixels[0:2, 0:2]))
 
+                self._sift_errors.append(
+                    (transform_pixels[0, 2], transform_pixels[1, 2], scaling_factor)
+                )
+                del self._sift_errors[:-self.sift_window]
 
-            x_distance = transform_pixels[0, 2]
-            y_distance = transform_pixels[1, 2]
+                moved = 0.0 if self._last_sift_pos is None else float(
+                    np.linalg.norm(np.asarray(self.curr_pos) - self._last_sift_pos)
+                )
+                self._last_sift_pos = np.asarray(self.curr_pos, dtype=float).copy()
 
-            transform_correction = np.identity(4)
+                x_distance, y_distance, scaling_factor = np.median(self._sift_errors, axis=0)
+                window_full = len(self._sift_errors) >= self.sift_window
+                settled = moved <= self.settle_tolerance
 
-            if abs(x_distance) > self.x_dist_threshold:
-                transform_correction[0, 3] = np.sign(x_distance) * self.correction_increment
-                # print("correcting x")
-            if abs(y_distance) > self.y_dist_threshold:
-                transform_correction[1, 3] = np.sign(y_distance) * self.correction_increment
-                # print("correcting y")
+                self.sift_converged = bool(
+                    window_full
+                    and abs(x_distance) <= self.x_dist_threshold
+                    and abs(y_distance) <= self.y_dist_threshold
+                )
 
-            if abs(scaling_factor) > 0.05:
-                transform_correction[2,3] = np.sign(scaling_factor) * self.correction_increment
-                # print("correcting z")
+                apply_correction = window_full and settled and not self.sift_converged
+                self.get_logger().info(
+                    f"SIFT t={idx}: {len(good_feature)} matches, {num_inliers} inliers, "
+                    f"median dx={x_distance:.1f}px dy={y_distance:.1f}px over "
+                    f"{len(self._sift_errors)}/{self.sift_window}, moved={moved * 1e3:.1f}mm"
+                    f"{'' if apply_correction else ' -> gathering'}"
+                )
+                if apply_correction:
+                    transform_correction = np.identity(4)
+
+                    # Correction proportional to the measured pixel error: a fixed increment
+                    # needs dozens of timesteps to close a large offset, so it never catches up
+                    # on short feedback windows.
+                    if abs(x_distance) > self.x_dist_threshold:
+                        transform_correction[0, 3] = np.clip(
+                            self.correction_gain * x_distance, -self.max_correction_step, self.max_correction_step
+                        )
+                    if abs(y_distance) > self.y_dist_threshold:
+                        transform_correction[1, 3] = np.clip(
+                            self.correction_gain * y_distance, -self.max_correction_step, self.max_correction_step
+                        )
+
+                    if abs(scaling_factor) > 0.05:
+                        transform_correction[2, 3] = np.sign(scaling_factor) * self.correction_increment
+
+                    # Fresh window for the next correction, measured after the arm has moved.
+                    self._sift_errors.clear()
 
         for k in kp1:
             k.pt = (k.pt[0] + cx_cy_array_ds[0], k.pt[1] + cx_cy_array_ds[1])
@@ -180,6 +227,9 @@ class CameraFeedback():
                 self.current_template_pub.publish(loaded_image_msg)
             except Exception as e:
                 print(e)
+
+        if not apply_correction:
+            return
 
         transform_base_2_cam = self.get_transform('panda_link0', 'camera_color_optical_frame')
         if transform_base_2_cam is None:
