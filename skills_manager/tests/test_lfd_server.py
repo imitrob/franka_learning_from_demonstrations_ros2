@@ -1,9 +1,13 @@
 import os
 import queue
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from unittest.mock import patch
 from panda_control.panda import Panda, MotionError
 
@@ -14,7 +18,8 @@ from rclpy.action import GoalResponse
 
 from lfd_msgs.msg import OperationStatus
 from multi_modal_reasoning.skill_command import SkillCommand
-from skills_manager.lfd_server import LfDServer
+from skills_manager.lfd_server import LfDServer, _OperationTimedOut
+from test_motion_recovery import Robot
 
 
 def _task(action, objects=None, parameters=None):
@@ -392,3 +397,113 @@ def test_failed_operation_releases_admission_for_next_command():
     assert server._execute_goal_callback(request) == GoalResponse.ACCEPT
     assert not server._motion_cancel.is_set()
     assert server._motion_fault == ""
+
+
+def test_recovery_keeps_admission_and_publishes_pause_then_recovery():
+    server = _AdmissionServer()
+    assert server._execute_goal_callback(_request(_task("pick", ["cube"]))) == GoalResponse.ACCEPT
+    operation_id = server._operation_id
+    server._recovery_target = ((0.3, 0., 0.), (0., 0., 0., 1.))
+    server._recovery_reason = "Tracking timed out"
+    server._recovery_requested.set()
+    messages = []
+    server._status_pub = SimpleNamespace(publish=messages.append)
+    server._publish_operation_status()
+    assert messages[-1].phase == "paused_tracking"
+    assert messages[-1].mode == OperationStatus.EXECUTING
+    assert messages[-1].operation_id == operation_id
+    assert server._execute_goal_callback(_request(_task("pick", ["bowl"]))) == GoalResponse.REJECT
+    server._recovery_requested.clear()
+    server._publish_operation_status()
+    assert messages[-1].phase == "recovering"
+    server._recovery_target = None
+    server._publish_operation_status()
+    assert messages[-1].phase == "accepted" and server._operation_id == operation_id
+
+
+@pytest.mark.parametrize("phase", ["failed", "canceled", "timed_out"])
+def test_terminal_status_wins_over_recovery_and_tracking(phase):
+    server = _AdmissionServer()
+    server._operation_mode = OperationStatus.EXECUTING
+    server._recovery_target = ((0.3, 0., 0.), (0., 0., 0., 1.))
+    server._recovery_reason = "Tracking timed out"
+    server._recovery_requested.set()
+    server._tracking_since = time.monotonic()
+    messages = []
+    server._status_pub = SimpleNamespace(publish=messages.append)
+    server._set_operation_phase(phase, "terminal reason")
+    server._publish_operation_status()  # The periodic publisher must preserve it too.
+    assert all(m.phase == phase and m.message == "terminal reason" for m in messages)
+
+
+class _RecoveryServer(Robot, _AdmissionServer):
+    def __init__(self):
+        _AdmissionServer.__init__(self)
+        Robot.__init__(self)
+        self._record_finish = threading.Event()
+        self._lease_released = threading.Event()
+        self._record_timed_out = False
+        self.end = False
+
+    # Unlike Robot's synchronous fake, only the controller thread acknowledges holds.
+    stop = Panda.stop
+    wait_for_hold = Panda.wait_for_hold
+    motion_sleep = Panda.motion_sleep
+
+
+@contextmanager
+def recovering_operation(server, action):
+    stopped = threading.Event()
+    def control():
+        while not stopped.wait(0.001):
+            server._control_step(server.ctrl)
+    with patch("panda_control.panda.rclpy.ok", return_value=True):
+        controller = threading.Thread(target=control)
+        controller.start()
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(action)
+                try:
+                    yield future
+                finally:
+                    server.stop()
+        finally:
+            stopped.set()
+            controller.join(timeout=1)
+            assert not controller.is_alive()
+
+
+@pytest.mark.parametrize("mode,deadline", [
+    (OperationStatus.RECORDING_SKILL, "_record_deadline"),
+    (OperationStatus.CAPTURING_TEMPLATE, "_lease_deadline"),
+])
+@pytest.mark.parametrize("resume", [False, True])
+def test_recovery_observes_expiry_without_moving(mode, deadline, resume):
+    server = _RecoveryServer()
+    server._operation_mode = mode
+    setattr(server, deadline, time.monotonic() + 30)
+    server._request_recovery("test", [0.2, 0., 0.], [0., 0., 0., 1.])
+    moves = []
+    server.go_to_pose_ik = lambda *a, **kw: moves.append(True)
+    with recovering_operation(server, server._recover_motion) as future:
+        assert server._hold_done.wait(1)
+        setattr(server, deadline, time.monotonic() - 1)
+        if resume:
+            server.resume_motion()
+        with pytest.raises(_OperationTimedOut):
+            future.result(timeout=1)
+    assert moves == []
+
+
+def test_resume_service_reports_admission_and_backend_errors():
+    server = _AdmissionServer()
+    server.resume_motion = lambda: True
+    assert not server._resume_motion_callback(None, SimpleNamespace()).success
+    server._operation_mode = OperationStatus.EXECUTING
+    for accepted in (False, True):
+        server.resume_motion = lambda: accepted
+        response = server._resume_motion_callback(None, SimpleNamespace())
+        assert response.success is accepted
+    with patch.object(server, "resume_motion", side_effect=RuntimeError("state unavailable")):
+        response = server._resume_motion_callback(None, SimpleNamespace())
+    assert not response.success and "state unavailable" in response.message

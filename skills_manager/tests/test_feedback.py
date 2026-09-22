@@ -1,11 +1,13 @@
 import os
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("PYNPUT_BACKEND", "dummy")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl-lfd-feedback-tests")
 
 from skills_manager.feedback import Feedback, FrankaOnPress
+from pynput.keyboard import KeyCode
 
 
 class _FeedbackServer(Feedback):
@@ -67,3 +69,21 @@ def test_franka_button_listener_has_low_shutdown_latency():
     buttons.desk._listen_thread.join()
 
     assert buttons.desk.recv_timeout <= 0.1
+
+
+def test_space_confirms_recovery_without_toggling_pause_or_starting_other_motion():
+    server = _FeedbackServer()
+    server.pause = False
+    server._recovery_target = "saved waypoint"
+    resumes = []
+    server.resume_motion = lambda: resumes.append(True)
+    # pynput's dummy backend aliases every special key to the same enum value.
+    with patch("skills_manager.feedback.Key", SimpleNamespace(esc=object(), space=object())) as keys:
+        server.keyboard_on_press(keys.space)
+        assert resumes == [True] and not server.pause
+        for char in "comn":
+            server.keyboard_on_press(KeyCode.from_char(char))
+        assert server.gripper_commands == []
+        server._recovery_target = None
+        server.keyboard_on_press(keys.space)
+        assert server.pause  # Ordinary recording pause still works.

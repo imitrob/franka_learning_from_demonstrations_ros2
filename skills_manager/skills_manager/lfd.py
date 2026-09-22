@@ -105,6 +105,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
         recording_started = False
         self.set_stiffness(0,0,0,0,0,0,0)
+        self._teaching = True
         try:
             init_pos = self.curr_pos
             vel = 0
@@ -115,6 +116,8 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                 if self.is_applied_external_feedback(): # feedback changed and not kinesthetic teaching
                     time.sleep(0.1)
                     print("External control, setting stiffness!", flush=True)
+                    self.move_to_pose_with_stampedpose(self.curr_pose)
+                    self._teaching = False
                     self.set_stiffness(1000, 1000, 1000, 400, 400, 400, 0)
                     break
                 vel = math.sqrt((self.curr_pos[0]-init_pos[0])**2 + (self.curr_pos[1]-init_pos[1])**2 + (self.curr_pos[2]-init_pos[2])**2)
@@ -189,7 +192,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
                 alpha_when_moving = 0.02
                 alpha = alpha_when_moving + (roll_redution_alpha - alpha_when_moving) * np.exp(-4.0*trans_speed)
-                q_goal = Transform.step_toward_roll(q_pre, alpha=alpha)
+                q_goal = q_curr if self._teaching else Transform.step_toward_roll(q_pre, alpha=alpha)
 
                 qx, qy, qz, qw = q_goal.vec_xyzs  # returns (x,y,z,w)
                 goal.pose.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
@@ -214,6 +217,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                     print(f"WARN: trajectory recording at {round(1.0 / (time.perf_counter() - t0))} samples per sec")
                 self.r.sleep()
         finally:
+            self._teaching = False
             goal = PoseStamped()
             goal.header.stamp = self.get_clock().now().to_msg()
             goal.header.frame_id = "map"
@@ -292,6 +296,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         if localizing and previous is not None and not previous.done():
             raise RuntimeError("Previous localization is still running")
         deadline = time.monotonic() + timeout
+        recovery_elapsed = self._recovery_elapsed
         with self._motion_lock:
             self._accept_localizer_goals = localizing
             self.external_call_msg = None
@@ -301,13 +306,14 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                 self._localization_future = future
             while True:
                 self.check_motion()
-                if time.monotonic() >= deadline:
+                self._recover_motion()
+                if time.monotonic() >= deadline + self._recovery_elapsed - recovery_elapsed:
                     self.fail_motion("Robot service timed out")
                 with self._motion_lock:
                     pose = self.external_call_msg
                     self.external_call_msg = None
                 if pose is not None:
-                    # Corrections are tracking targets, not permission for a large jump.
+                    # Validate the destination; interpolation bounds each controller target.
                     self._validate_target(
                         [pose.pose.position.x, pose.pose.position.y, pose.pose.position.z],
                         [pose.pose.orientation.x, pose.pose.orientation.y,
@@ -455,11 +461,10 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         goal.header.frame_id = 'panda_link0'
 
         self.correct()
-        self._validate_target(position_2_array(goal.pose.position),
-                              [quat_goal.x, quat_goal.y, quat_goal.z, quat_goal.w])
-
+        # Recover before gripper actions, without changing their normal ordering.
+        self._prepare_target(position_2_array(goal.pose.position),
+                             [quat_goal.x, quat_goal.y, quat_goal.z, quat_goal.w])
         self.gripper_step(self.loaded_gripper[0][self.time_index])
-
         self.move_to_pose_with_stampedpose(goal)
 
         sift_step = bool(self.loaded_img_feedback_flag[0, self.time_index])
@@ -476,6 +481,9 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
         goal_pos_array = position_2_array(goal.pose.position)
         pos_2_goal_diff = np.linalg.norm(self.curr_pos-goal_pos_array)
+
+        # Do not advance or append samples while waiting for pose recovery.
+        self.motion_sleep(1.0 / self.freq)
 
         # Hold a camera-feedback step until SIFT has closed the image error; otherwise the
         # trajectory walks on after a single small correction and never converges.
@@ -498,7 +506,6 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
             self.go_to_pose(start) # PoseStamped
             self.time_index = 0
             self.retry_counter = self.retry_counter + 1
-        self.motion_sleep(1.0 / self.freq)
 
         # save step sample
         self.recorded_traj = np.c_[self.recorded_traj, self.curr_pos]

@@ -43,6 +43,7 @@ HIGH_POINT_DIFFERENCE = 0.1 # m
 HIGH_ORI_DIFFERENCE = 0.1  # radians; tracking tolerance is half this limit
 TRACKING_TIMEOUT = 5.0  # seconds without reaching the current waypoint
 STOP_TIMEOUT = 2.0  # controller acknowledgement deadline
+RECOVERY_DT = 0.05  # slow recovery: <= 2 mm and 0.025 rad per interpolation step
 JOINT_NAMES = [f"panda_joint{i}" for i in range(1, 8)] + [
     "panda_finger_joint1", "panda_finger_joint2"]
 
@@ -76,6 +77,10 @@ class MotionCanceled(RuntimeError):
 
 class MotionError(RuntimeError):
     pass
+
+
+class _RecoveryPaused(Exception):
+    """Unwind only a failed recovery attempt, not the enclosing operation."""
 
 
 def robot_operation(method):
@@ -178,16 +183,31 @@ class Panda():
         self._accept_localizer_goals = False
         self.external_call_msg = None
         self.tracking_timeout = TRACKING_TIMEOUT
+        self.tracking_angle_tolerance = HIGH_ORI_DIFFERENCE / 2
+        self.position_recovery_limit = HIGH_POINT_DIFFERENCE
+        self.orientation_recovery_limit = HIGH_ORI_DIFFERENCE
+        self.recovery_dt = RECOVERY_DT
+        self._recovery_requested = threading.Event()
+        self._resume_requested = threading.Event()
+        self._recovery_target = None
+        self._recovery_reason = ""
+        self._recovering = False
+        self._recovery_elapsed = 0.0
+        self._teaching = False
 
     def begin_motion(self):
         with self._motion_lock:
             if not self._controller_ready.is_set():
                 raise MotionError("Controller unavailable")
-            if self._motion_cancel.is_set() and not self._hold_done.is_set():
+            if (self._motion_cancel.is_set() or self._recovery_requested.is_set()) and not self._hold_done.is_set():
                 raise MotionError("Controller has not acknowledged stop")
             self._motion_fault = ""
             self._motion_cancel.clear()
             self._tracking_since = None
+            self._recovery_requested.clear()
+            self._resume_requested.clear()
+            self._recovery_target = None
+            self._recovery_reason = ""
 
     @contextmanager
     def robot_operation(self):
@@ -220,6 +240,9 @@ class Panda():
     def motion_sleep(self, seconds):
         self._motion_cancel.wait(seconds)
         self.check_motion()
+        while not self.safety_checker():
+            self._motion_cancel.wait(0.02)
+            self.check_motion()
 
     def fail_motion(self, reason):
         with self._motion_lock:
@@ -233,13 +256,92 @@ class Panda():
 
     def check_tracking(self, reached):
         self.check_motion()
-        if reached:
-            self._tracking_since = None
-        elif self._tracking_since is None:
-            self._tracking_since = time.monotonic()
-        elif time.monotonic() - self._tracking_since >= self.tracking_timeout:
-            self.fail_motion("Tracking timed out")
+        with self._motion_lock:
+            if reached:
+                self._tracking_since = None
+            elif self.contact_detected:
+                self._request_recovery("Contact while tracking")
+            elif self._tracking_since is None:
+                self._tracking_since = time.monotonic()
+            elif time.monotonic() - self._tracking_since >= self.tracking_timeout:
+                self._request_recovery("Tracking timed out")
         return reached
+
+    @property
+    def contact_detected(self):
+        state = self.panda.get_state()
+        return any(state.cartesian_contact) or any(state.cartesian_collision) or any(state.joint_collision)
+
+    def _request_recovery(self, reason, position=None, orientation=None):
+        with self._motion_lock:
+            self.check_motion()
+            if self._recovery_requested.is_set():
+                return
+            if self._recovery_target is None:
+                position = self.goal_position if position is None else position
+                orientation = self.goal_orientation if orientation is None else orientation
+                self._recovery_target = (tuple(position), tuple(orientation))
+            self._recovery_reason = reason
+            self._resume_requested.clear()
+            self._hold_done.clear()
+            self._recovery_requested.set()
+            self.goal_position = self.goal_orientation = None
+            self.external_call_msg = None
+        self.get_logger().warning(f"Motion paused: {reason}. Clear the path, then explicitly resume.")
+
+    def resume_motion(self):
+        """Confirm the path is clear; the operation's worker performs the recovery."""
+        with self._motion_lock:
+            if (not self._recovery_requested.is_set() or not self._hold_done.is_set()
+                    or not self._controller_ready.is_set() or self._motion_cancel.is_set()
+                    or self._motion_fault or self.contact_detected):
+                return False
+            self._resume_requested.set()
+            return True
+
+    def _check_recovery_stop(self):
+        """Worker-only hook for operation deadlines and finish/release requests."""
+        self.check_motion()
+
+    def _recover_motion(self):
+        if self._recovery_target is not None:
+            self._check_recovery_stop()
+        if not self._recovery_requested.is_set():
+            return
+        if self._recovering:
+            raise _RecoveryPaused()
+        started = time.monotonic()
+        try:
+            while self._recovery_requested.is_set():
+                self.check_motion()
+                self.wait_for_hold()
+                while not self._resume_requested.wait(0.02):
+                    self._check_recovery_stop()
+                self._check_recovery_stop()  # Expiry/finish wins over queued resume.
+                with self._motion_lock:
+                    self.check_motion()
+                    position, orientation = self._recovery_target
+                    self._recovery_requested.clear()
+                    self._resume_requested.clear()
+                    self._tracking_since = None
+                    self._recovering = True
+                try:
+                    x, y, z, w = orientation
+                    target = pos_quat_2_pose_st(np.array(position), quaternion.quaternion(w, x, y, z))
+                    # IK checks reachability, not collisions. Each attempt needs operator consent.
+                    self.go_to_pose_ik(target, dt=self.recovery_dt)
+                    while not self.safety_checker():
+                        self.motion_sleep(self.recovery_dt)
+                except _RecoveryPaused:
+                    pass  # Remain paused; never retry an obstructed/unreachable path automatically.
+                finally:
+                    with self._motion_lock:
+                        self._recovering = False
+                        if not self._recovery_requested.is_set():
+                            self._recovery_target = None
+                            self._recovery_reason = ""
+        finally:
+            self._recovery_elapsed += time.monotonic() - started
 
     def has_realtime_kernel(self):
         return panda_py.libfranka.has_realtime_kernel()
@@ -255,7 +357,8 @@ class Panda():
         
     def external_call(self, msg):
         with self._motion_lock:
-            if self._accept_localizer_goals and not self._motion_cancel.is_set():
+            if (self._accept_localizer_goals and not self._motion_cancel.is_set()
+                    and self._recovery_target is None):
                 self.external_call_msg = deepcopy(msg)
             else:
                 self.get_logger().warning("Pose rejected: no active localization operation")
@@ -281,9 +384,9 @@ class Panda():
         self.move_gripper(self.grip_open_width)
 
     def grasp_gripper(self, width):
-        self.check_motion()
+        self._check_gripper_motion()
         self.gripper.stop()
-        self.gripper.grasp(width=width, speed=0.05, force=50, epsilon_inner=0.055, epsilon_outer=0.055)
+        self.grasp(width=width, speed=0.05, force=50, epsilon_inner=0.055, epsilon_outer=0.055)
 
     def home(self,
              height=HOME_POSE.position[2],
@@ -320,6 +423,7 @@ class Panda():
             self.external_call_msg = None
 
     def home_gripper(self):
+        self._check_gripper_motion()
         self.gripper.homing()
         # self.homing_pub.publish(self.home_command)
 
@@ -391,7 +495,7 @@ class Panda():
                               goal_pose.pose.orientation.x,
                               goal_pose.pose.orientation.y,
                               goal_pose.pose.orientation.z])
-        max_ori_step = HIGH_ORI_DIFFERENCE / 4  # leave room for tracking lag
+        max_ori_step = self.orientation_recovery_limit / 4  # leave room for tracking lag
         step_num_ori = max(1, math.ceil(q_angle(q_start_wxyz, q_goal_wxyz) / max_ori_step))
         if goal_configuration is None:
             quaternion_array = np.array([goal_pose.pose.orientation.w, goal_pose.pose.orientation.x, goal_pose.pose.orientation.y, goal_pose.pose.orientation.z]) 
@@ -447,13 +551,16 @@ class Panda():
                 self.motion_sleep(0.01)
             
         else:
-            self.fail_motion("No feasible joint configuration found")
+            self._request_recovery("No feasible joint configuration found", goal_array,
+                                   q_goal_wxyz[[1, 2, 3, 0]])
+            self._recover_motion()
 
     def go_to_pose_ik(self, goal_pose: PoseStamped, goal_configuration=None,
                     interp_dist=0.002, interp_dist_joint=0.008,
                     dt = 0.02,
                     ):
-        self.set_stiffness(1000,1000,1000,80,80,80,0)
+        if not self._recovering:
+            self.set_stiffness(1000,1000,1000,80,80,80,0)
         # self.move_to_pose_with_stampedpose(self.curr_pose)
         # self.set_configuration(self.curr_joint)
         
@@ -481,7 +588,10 @@ class Panda():
             if not sol.success:
                 sol = robot.ikine_LM(T)
             if not sol.success:
-                self.fail_motion("No feasible joint configuration found")
+                self._request_recovery("No feasible joint configuration found", goal_xyz,
+                                       q_goal_wxyz[[1, 2, 3, 0]])
+                self._recover_motion()
+                return
             goal_configuration = np.asarray(sol.q, dtype=float)
         else:
             goal_configuration = np.asarray(goal_configuration, dtype=float)
@@ -496,7 +606,7 @@ class Panda():
         step_jnt = max(1, int(math.ceil(max_joint / interp_dist_joint)))       # ~0.08 rad
 
         # Orientation (allow large steps)
-        max_ori_step = HIGH_ORI_DIFFERENCE / 4  # leave room for tracking lag
+        max_ori_step = self.orientation_recovery_limit / 4  # leave room for tracking lag
         ori_dist = q_angle(q_start_wxyz, q_goal_wxyz)
         step_ori = max(1, int(math.ceil(ori_dist / max_ori_step)))
 
@@ -521,7 +631,7 @@ class Panda():
         def refine_quat(max_time_s=0.30):
             start_t = time.monotonic()
             ang_tol  = math.radians(0.6)   # ~0.6°
-            max_step = HIGH_ORI_DIFFERENCE / 4
+            max_step = self.orientation_recovery_limit / 4
             gamma    = 0.6                 # aggressive correction
             while (time.monotonic() - start_t) < max_time_s:
                 q_curr = q_norm([self.curr_pose.pose.orientation.w,
@@ -536,7 +646,7 @@ class Panda():
                 self.move_to_pose_with_stampedpose(pos_quat_2_pose_st(goal_xyz, quaternion.quaternion(*q_next)))
                 self.motion_sleep(0.006)
 
-        if ori_dist > math.radians(0.3):  # skip if orientation change was tiny
+        if not self._recovering and ori_dist > math.radians(0.3):
             refine_quat(max_time_s=0.30)
 
         # Final exact goal (cheap) and short settle
@@ -544,11 +654,19 @@ class Panda():
         self.motion_sleep(0.15)
 
     def safety_checker(self):
-        distance = np.linalg.norm(self.curr_pos_goal - self.curr_pos)
-        angle = q_angle(q_norm(self.curr_ori_goal_wxyz), q_norm(self.curr_ori_wxyz))
-        self.safety_check = self.check_tracking(
-            distance <= self.attractor_distance_threshold and angle <= HIGH_ORI_DIFFERENCE / 2
-        )
+        self.check_motion()
+        self._recover_motion()
+        with self._motion_lock:
+            if self._teaching or self.goal_position is None:
+                return True
+            distance, angle = self._validate_target(self.goal_position, self.goal_orientation)
+            if distance > self.position_recovery_limit or angle > self.orientation_recovery_limit:
+                self._request_recovery(f"Tracking limit exceeded: position={distance:.4f} m, orientation={angle:.4f} rad")
+                self.safety_check = False
+            else:
+                self.safety_check = self.check_tracking(
+                    distance <= self.attractor_distance_threshold and angle <= self.tracking_angle_tolerance)
+        self._recover_motion()
         return self.safety_check
 
     def offset_compensator(self, steps):
@@ -616,7 +734,7 @@ class Panda():
     def _control_step(self, ctrl):
         # Publishing and stop share this lock: no late waypoint can undo a stop.
         with self._motion_lock:
-            if self._motion_cancel.is_set():
+            if self._motion_cancel.is_set() or self._recovery_requested.is_set():
                 if not self._hold_done.is_set():
                     ctrl.set_control(self.curr_pos, self.curr_ori_xyzw)
                     ctrl.set_impedance(np.diag([self.K_pos] * 3 + [self.K_ori] * 3))
@@ -625,10 +743,30 @@ class Panda():
             if self.goal_position is None or self.goal_orientation is None:
                 return
             try:
-                self._validate_target(self.goal_position, self.goal_orientation)
+                if self._teaching:
+                    # Hand-guided displacement is intentional, not tracking failure.
+                    position, orientation = self.curr_pos, self.curr_ori_xyzw
+                    self._validate_target(position, orientation)
+                    ctrl.set_control(position, orientation)
+                    return
+                distance, angle = self._validate_target(self.goal_position, self.goal_orientation)
+                if distance > self.position_recovery_limit or angle > self.orientation_recovery_limit:
+                    self._request_recovery(f"Tracking limit exceeded: position={distance:.4f} m, orientation={angle:.4f} rad")
+                else:
+                    self.check_tracking(distance <= self.attractor_distance_threshold
+                                        and angle <= self.tracking_angle_tolerance)
             except MotionError:
-                self._control_step(ctrl)  # service the newly latched hold
+                self._control_step(ctrl)  # service the newly latched stop
                 return
+            if self._recovery_requested.is_set():
+                self._control_step(ctrl)
+                return
+            if self._hold_done.is_set():
+                ctrl.set_impedance(np.diag([
+                    self.translational_stiffness_X, self.translational_stiffness_Y,
+                    self.translational_stiffness_Z, self.rotational_stiffness_X,
+                    self.rotational_stiffness_Y, self.rotational_stiffness_Z]))
+                self._hold_done.clear()
             ctrl.set_control(self.goal_position, self.goal_orientation)
 
     def ctrl_node(self, frequency=500):
@@ -683,23 +821,44 @@ class Panda():
             self.fail_motion(str(exc))
         if not np.isfinite(distance) or not np.isfinite(angle):
             self.fail_motion("Invalid robot pose")
-        if distance > HIGH_POINT_DIFFERENCE or angle > HIGH_ORI_DIFFERENCE:
-            self.fail_motion(f"Tracking limit exceeded: position={distance:.4f} m, orientation={angle:.4f} rad")
+        return distance, angle
+
+    def _prepare_target(self, position, orientation):
+        while True:
+            self._recover_motion()
+            with self._motion_lock:
+                self.check_motion()
+                distance, angle = self._validate_target(position, orientation)
+                if not self._teaching and (distance > self.position_recovery_limit or angle > self.orientation_recovery_limit):
+                    self._request_recovery(
+                        f"Tracking limit exceeded: position={distance:.4f} m, orientation={angle:.4f} rad",
+                        position, orientation)
+                if not self._recovery_requested.is_set():
+                    return
 
     def move_to_pose(self, position: Iterable[float], orientation: Iterable[float], speed_factor: float):
-        with self._motion_lock:
-            self.check_motion()
-            self._validate_target(position, orientation)
-            self.goal_position = tuple(position)
-            self.goal_orientation = tuple(np.asarray(orientation) / np.linalg.norm(orientation))
-            self.goal_q_nullspace = None
+        while True:
+            self._prepare_target(position, orientation)
+            with self._motion_lock:
+                self.check_motion()
+                if self._recovery_requested.is_set():
+                    continue
+                self.goal_position = tuple(position)
+                self.goal_orientation = tuple(np.asarray(orientation) / np.linalg.norm(orientation))
+                self.goal_q_nullspace = None
+                return
+
+    def _check_gripper_motion(self):
+        self.check_motion()
+        if self._recovery_target is not None:
+            raise MotionError("Gripper unavailable during motion recovery")
 
     def grasp(self, *args, **kwargs):
-        self.check_motion()
+        self._check_gripper_motion()
         self.gripper.grasp(*args, **kwargs)
 
     def move(self, *args, **kwargs):
-        self.check_motion()
+        self._check_gripper_motion()
         self.gripper.move(*args, **kwargs)
 
     @property

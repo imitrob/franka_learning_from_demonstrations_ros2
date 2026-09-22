@@ -27,6 +27,7 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalRespons
 from rclpy.duration import Duration
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 from trajectory_data.skill_part import SkillPart
 
 from skills_manager.lfd import LfD
@@ -50,6 +51,10 @@ _OperationCanceled = MotionCanceled
 
 class _OperationTimedOut(Exception):
     pass
+
+
+class _RecoveryFinished(Exception):
+    """Finish/release unwinds recovery without discarding a recorded demonstration."""
 
 
 class LfDServer(LfD):
@@ -193,7 +198,24 @@ class LfDServer(LfD):
             10,
             callback_group=self.callback_group,
         )
+        self.create_service(
+            Trigger, "/lfd/resume_motion", self._resume_motion_callback,
+            callback_group=self.callback_group,
+        )
+        self.create_timer(0.2, self._publish_operation_status, callback_group=self.callback_group)
         self._publish_operation_status()
+
+    def _resume_motion_callback(self, _request, response):
+        try:
+            with self._state_lock:
+                active = self._operation_mode != OperationStatus.IDLE
+                response.success = active and self.resume_motion()
+            response.message = ("Recovery requested; path confirmed clear" if response.success
+                                else "No active recovery hold, contact detected, or controller unavailable")
+        except Exception as exc:
+            response.success = False
+            response.message = f"Could not request recovery: {exc}"
+        return response
 
     # --- shared admission/state -----------------------------------------
 
@@ -279,6 +301,13 @@ class LfDServer(LfD):
             message.target = self._operation_target
             message.phase = self._operation_phase
             message.message = self._operation_message
+            if (self._operation_mode != OperationStatus.IDLE
+                    and message.phase not in ("failed", "canceled", "timed_out")):
+                if self._recovery_target is not None:
+                    message.phase = "paused_tracking" if self._recovery_requested.is_set() else "recovering"
+                    message.message = self._recovery_reason
+                elif self._tracking_since is not None:
+                    message.phase = "waiting_for_tracking"
         self._status_pub.publish(message)
 
     def _finish_operation(self, cleanup_error="", outcome="completed"):
@@ -573,35 +602,44 @@ class LfDServer(LfD):
         outcome = "failed"
         error = ""
         saved = ""
+        started = False
+
+        def on_phase(phase):
+            nonlocal started
+            started = started or phase == "recording"
+            self._record_phase(goal_handle, phase)
 
         self.end = False
         try:
             self._start_inputs()
-            self._raise_if_canceled(goal_handle)
-            self._record_feedback(goal_handle, "homing")
-            if goal_handle.request.home_before_recording:
-                self.home()
-                self.offset_compensator(20)
-            self._raise_record_stop(goal_handle)
-            if self._record_finish_requested():
-                outcome = "completed"
-                return self._finish_recording_early(goal_handle, result)
+            try:
+                self._raise_if_canceled(goal_handle)
+                self._record_feedback(goal_handle, "homing")
+                if goal_handle.request.home_before_recording:
+                    self.home()
+                    self.offset_compensator(20)
+                self._raise_record_stop(goal_handle)
+                if self._record_finish_requested():
+                    outcome = "completed"
+                    return self._finish_recording_early(goal_handle, result)
 
-            self._record_feedback(goal_handle, "localizing")
-            self._validate_template(template)
-            if self.localize(template) is False:
-                raise RuntimeError(f"{template} not found")
-            self._raise_record_stop(goal_handle)
-            if self._record_finish_requested():
-                outcome = "completed"
-                return self._finish_recording_early(goal_handle, result)
+                self._record_feedback(goal_handle, "localizing")
+                self._validate_template(template)
+                if self.localize(template) is False:
+                    raise RuntimeError(f"{template} not found")
+                self._raise_record_stop(goal_handle)
+                if self._record_finish_requested():
+                    outcome = "completed"
+                    return self._finish_recording_early(goal_handle, result)
 
-            started = self.traj_rec(
-                should_stop=lambda: self._record_should_stop(goal_handle),
-                on_phase=lambda phase: self._record_phase(goal_handle, phase),
-                signalize=False,
-            )
-            self._raise_record_stop(goal_handle)
+                started = self.traj_rec(
+                    should_stop=lambda: self._record_should_stop(goal_handle),
+                    on_phase=on_phase,
+                    signalize=False,
+                )
+                self._raise_record_stop(goal_handle)
+            except _RecoveryFinished:
+                pass  # Already holding; use the ordinary finish/save path below.
             if not started:
                 outcome = "completed"
                 return self._finish_recording_early(goal_handle, result)
@@ -670,7 +708,30 @@ class LfDServer(LfD):
             self._record_timed_out = self._record_timed_out or timed_out
         return timed_out
 
+    def _check_recovery_stop(self):
+        super()._check_recovery_stop()
+        # Never called by the controller or under _motion_lock: admission takes
+        # _state_lock before _motion_lock, so reversing that order would deadlock.
+        with self._state_lock:
+            if self._operation_mode == OperationStatus.RECORDING_SKILL:
+                expired = self._record_timed_out or (
+                    self._record_deadline and time.monotonic() > self._record_deadline)
+                self._record_timed_out = bool(expired)
+                finished = self._record_finish_requested()
+            elif self._operation_mode == OperationStatus.CAPTURING_TEMPLATE:
+                expired = self._lease_deadline and time.monotonic() > self._lease_deadline
+                finished = self._lease_released.is_set()
+            else:
+                return
+        if expired or finished:
+            self._request_recovery("Operation timed out" if expired else "Operation finished")
+            self.wait_for_hold()
+            self.check_motion()  # Cancellation/fault still wins over normal finish.
+            raise _OperationTimedOut() if expired else _RecoveryFinished()
+
     def _raise_record_stop(self, goal_handle):
+        self.check_motion()
+        self._recover_motion()
         if goal_handle.is_cancel_requested or not rclpy.ok():
             raise _OperationCanceled("canceled")
         with self._state_lock:
@@ -744,6 +805,10 @@ class LfDServer(LfD):
                     raise _OperationTimedOut()
 
             self._raise_if_canceled(goal_handle)
+            result.message = "Template reservation released"
+            goal_handle.succeed()
+            outcome = "completed"
+        except _RecoveryFinished:
             result.message = "Template reservation released"
             goal_handle.succeed()
             outcome = "completed"
@@ -886,6 +951,7 @@ class LfDServer(LfD):
 
     def _raise_if_canceled(self, goal_handle):
         self.check_motion()
+        self._recover_motion()
         if not goal_handle.is_cancel_requested:
             return
         try:

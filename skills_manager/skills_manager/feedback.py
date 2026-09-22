@@ -290,6 +290,12 @@ class Feedback(FrankaConnector, KeyboardConnector, JoystickConnector, Teleoperat
             self._robot.stop()
             self._robot.stop_gripper()
             return
+        if key in (Key.space, *(KeyCode.from_char(c) for c in "comn")):
+            robot = self._robot
+            if robot is not None and getattr(robot, "_recovery_target", None) is not None:
+                if key == Key.space:
+                    robot.resume_motion()
+                return  # Only the operation worker may move the robot during recovery.
         if key == KeyCode.from_char('e'):
             self.end += 1
         # Feedback for translate forward/backward
