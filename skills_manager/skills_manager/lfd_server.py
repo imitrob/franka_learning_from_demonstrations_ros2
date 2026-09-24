@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Persistent single-owner server for every operation that moves Panda."""
+import faulthandler
 import math
 import os
 import queue
+import signal
 import threading
 import time
 import traceback
@@ -538,12 +540,15 @@ class LfDServer(LfD):
             feedback.phase = "homing"
             goal_handle.publish_feedback(feedback)
             request = goal_handle.request
-            self.home_gripper()
+            # Release whatever is held before moving; gripper homing closes
+            # the fingers, so it runs last.
+            self.open()
             self.home(
                 height=request.height,
                 front_offset=request.front_offset,
                 side_offset=request.side_offset,
             )
+            self.home_gripper()
             self.offset_compensator(20)
             self._raise_if_canceled(goal_handle)
             result.message = "Robot homed"
@@ -946,9 +951,10 @@ class LfDServer(LfD):
         self.keyboard_start()
         self.frankabuttons_start()
         self.joy_start()
+        self.teleop_start()
 
     def _stop_inputs(self):
-        for stop in (self.keyboard_stop, self.frankabuttons_stop, self.joy_stop):
+        for stop in (self.keyboard_stop, self.frankabuttons_stop, self.joy_stop, self.teleop_stop):
             try:
                 stop()
             except Exception as exc:
@@ -1067,6 +1073,8 @@ class LfDServer(LfD):
 
 
 def main(server_class=LfDServer):
+    # `kill -USR1 <pid>` prints every thread's stack, even when the process is deadlocked.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     rclpy.init()
     server = None
     failed = False

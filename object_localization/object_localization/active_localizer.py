@@ -252,6 +252,7 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
         print("Active localization started", flush=True)
         self._rate.sleep()
         self.timeout_counter = 0
+        misses = 0  # consecutive frames without the object, apart from servo steps
         while rclpy.ok():
             if self._img is None: # or self._prev_img is None or list(self._img.data) == list(self._prev_img.data):
                 self.get_logger().warning("No Image")
@@ -268,10 +269,12 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
             try:
                 resp = self.compute_box_tf.call(request=ComputeLocalization.Request(img=self._img))
                 if not resp.success:
-                    # A single miss can be a blurred frame mid-approach, so spend
-                    # the same budget the convergence loop gets before giving up.
-                    self.timeout_counter += 1
-                    if self.timeout_counter >= self.timeout_counter_max:
+                    # A single miss can be a blurred frame mid-approach. Count
+                    # misses on their own: sharing timeout_counter let servo steps
+                    # that did see the object use up the budget, so one blurred
+                    # frame after four good steps aborted a working localization.
+                    misses += 1
+                    if misses >= self.timeout_counter_max:
                         res.success = False
                         res.message = "object not detected"
                         self.get_logger().error(
@@ -279,6 +282,7 @@ class ActiveLocalizerNode(CustomTransformListener, SpinningRosNode):
                         return res
                     self._rate.sleep()
                     continue
+                misses = 0
                 box_tf = resp.pose
                 ori = [
                     resp.pose.pose.orientation.x,
