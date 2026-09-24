@@ -39,7 +39,8 @@ def generate_launch_description():
             "'.lower() == 'true' else 'lfd_server'",
         ]),
         name="lfd_server",
-        output="screen",
+        output="both",  # terminal and ~/.ros/log/<run>/ralfd_server-1-stdout.log
+        emulate_tty=True,  # line-buffered print(), so output is not held back
         parameters=[{
             "home_tolerance": LaunchConfiguration("home_tolerance"),
             "home_orientation_tolerance": LaunchConfiguration(

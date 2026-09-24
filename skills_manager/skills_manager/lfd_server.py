@@ -541,6 +541,7 @@ class LfDServer(LfD):
             feedback.phase = "homing"
             goal_handle.publish_feedback(feedback)
             request = goal_handle.request
+            self.home_gripper()
             self.home(
                 height=request.height,
                 front_offset=request.front_offset,

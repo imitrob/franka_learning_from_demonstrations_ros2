@@ -39,11 +39,13 @@ UPDATE_THREAD_INTERVAL = 1.0 # s
 # gap makes object_localization's get_scene skip most frames.
 TF_BROADCAST_INTERVAL = 0.01 # s
 OPEN_GRIPPER_WIDTH = 0.06 # How much gripper opens [m]
-HIGH_POINT_DIFFERENCE = 0.1 # m
-HIGH_ORI_DIFFERENCE = 0.1  # radians; tracking tolerance is half this limit
-TRACKING_TIMEOUT = 5.0  # seconds without reaching the current waypoint
+HIGH_POINT_DIFFERENCE = 0.15 # m
+HIGH_ORI_DIFFERENCE = 0.3  # radians; contact tasks settle ~9 deg off, so only this limit checks orientation
+TRACKING_TIMEOUT = 12.0  # seconds without reaching the current waypoint
 STOP_TIMEOUT = 2.0  # controller acknowledgement deadline
-RECOVERY_DT = 0.05  # slow recovery: <= 2 mm and 0.025 rad per interpolation step
+PACKET_LOSS_WINDOW = 2.0  # s; a second packet-loss reflex within this window is fatal
+MAX_ORI_STEP = 0.0375  # rad per interpolation step, independent of the pause limits
+RECOVERY_DT = 0.05  # slow recovery: <= 2 mm and MAX_ORI_STEP per interpolation step
 JOINT_NAMES = [f"panda_joint{i}" for i in range(1, 8)] + [
     "panda_finger_joint1", "panda_finger_joint2"]
 
@@ -113,7 +115,7 @@ class Panda():
         self.curr_pos_goal=None
         self.curr_ori_goal_wxyz=None
         self.goal_pose=None
-        self.attractor_distance_threshold=0.05
+        self.attractor_distance_threshold=0.08
         self.grip_open_width = OPEN_GRIPPER_WIDTH
         self.safety_check=True
          
@@ -179,11 +181,11 @@ class Panda():
         self._hold_done = threading.Event()
         self._controller_ready = threading.Event()
         self._motion_fault = ""
+        self._last_packet_loss = -math.inf
         self._tracking_since = None
         self._accept_localizer_goals = False
         self.external_call_msg = None
         self.tracking_timeout = TRACKING_TIMEOUT
-        self.tracking_angle_tolerance = HIGH_ORI_DIFFERENCE / 2
         self.position_recovery_limit = HIGH_POINT_DIFFERENCE
         self.orientation_recovery_limit = HIGH_ORI_DIFFERENCE
         self.recovery_dt = RECOVERY_DT
@@ -264,7 +266,8 @@ class Panda():
             elif self._tracking_since is None:
                 self._tracking_since = time.monotonic()
             elif time.monotonic() - self._tracking_since >= self.tracking_timeout:
-                self._request_recovery("Tracking timed out")
+                distance, angle = self._validate_target(self.goal_position, self.goal_orientation)
+                self._request_recovery(f"Tracking timed out: position={distance:.4f} m, orientation={angle:.4f} rad")
         return reached
 
     @property
@@ -495,7 +498,7 @@ class Panda():
                               goal_pose.pose.orientation.x,
                               goal_pose.pose.orientation.y,
                               goal_pose.pose.orientation.z])
-        max_ori_step = self.orientation_recovery_limit / 4  # leave room for tracking lag
+        max_ori_step = MAX_ORI_STEP
         step_num_ori = max(1, math.ceil(q_angle(q_start_wxyz, q_goal_wxyz) / max_ori_step))
         if goal_configuration is None:
             quaternion_array = np.array([goal_pose.pose.orientation.w, goal_pose.pose.orientation.x, goal_pose.pose.orientation.y, goal_pose.pose.orientation.z]) 
@@ -606,7 +609,7 @@ class Panda():
         step_jnt = max(1, int(math.ceil(max_joint / interp_dist_joint)))       # ~0.08 rad
 
         # Orientation (allow large steps)
-        max_ori_step = self.orientation_recovery_limit / 4  # leave room for tracking lag
+        max_ori_step = MAX_ORI_STEP
         ori_dist = q_angle(q_start_wxyz, q_goal_wxyz)
         step_ori = max(1, int(math.ceil(ori_dist / max_ori_step)))
 
@@ -631,7 +634,7 @@ class Panda():
         def refine_quat(max_time_s=0.30):
             start_t = time.monotonic()
             ang_tol  = math.radians(0.6)   # ~0.6°
-            max_step = self.orientation_recovery_limit / 4
+            max_step = MAX_ORI_STEP
             gamma    = 0.6                 # aggressive correction
             while (time.monotonic() - start_t) < max_time_s:
                 q_curr = q_norm([self.curr_pose.pose.orientation.w,
@@ -655,6 +658,8 @@ class Panda():
 
     def safety_checker(self):
         self.check_motion()
+        if not self._controller_ready.is_set():
+            return False  # controller restarting: hold the trajectory until it is back
         self._recover_motion()
         with self._motion_lock:
             if self._teaching or self.goal_position is None:
@@ -665,7 +670,7 @@ class Panda():
                 self.safety_check = False
             else:
                 self.safety_check = self.check_tracking(
-                    distance <= self.attractor_distance_threshold and angle <= self.tracking_angle_tolerance)
+                    distance <= self.attractor_distance_threshold)
         self._recover_motion()
         return self.safety_check
 
@@ -753,8 +758,7 @@ class Panda():
                 if distance > self.position_recovery_limit or angle > self.orientation_recovery_limit:
                     self._request_recovery(f"Tracking limit exceeded: position={distance:.4f} m, orientation={angle:.4f} rad")
                 else:
-                    self.check_tracking(distance <= self.attractor_distance_threshold
-                                        and angle <= self.tracking_angle_tolerance)
+                    self.check_tracking(distance <= self.attractor_distance_threshold)
             except MotionError:
                 self._control_step(ctrl)  # service the newly latched stop
                 return
@@ -792,10 +796,7 @@ class Panda():
                         self._control_step(ctrl)
                         time.sleep(0.001)
             except Exception as exc:
-                with self._motion_lock:
-                    self._motion_fault = f"Controller failed: {exc}"
-                    self.stop()
-                self.get_logger().error(self._motion_fault)
+                self._controller_failed(exc)
                 time.sleep(0.1)
             finally:
                 self._controller_ready.clear()
@@ -806,6 +807,20 @@ class Panda():
                     self.stop()
                     self.get_logger().error(self._motion_fault)
                     return
+
+    def _controller_failed(self, exc):
+        # Lost packets abort the controller but it restarts cleanly: keep the goal and let
+        # the operation wait in safety_checker. Repeated loss is a real network fault.
+        now = time.monotonic()
+        if ("communication_constraints_violation" in str(exc)
+                and now - self._last_packet_loss > PACKET_LOSS_WINDOW):
+            self._last_packet_loss = now
+            self.get_logger().warning(f"Controller restarting after packet loss: {exc}")
+            return
+        with self._motion_lock:
+            self._motion_fault = f"Controller failed: {exc}"
+            self.stop()
+        self.get_logger().error(self._motion_fault)
 
     def _validate_target(self, position, orientation):
         position = np.asarray(position, dtype=float)
@@ -840,7 +855,7 @@ class Panda():
             if turn:
                 # A fast recorded rotation is a command, not divergence: turn in guarded steps.
                 goal_wxyz = q_norm(np.asarray(orientation)[[3, 0, 1, 2]])
-                steps = math.ceil(angle / (self.orientation_recovery_limit / 4)) + 1
+                steps = math.ceil(angle / MAX_ORI_STEP) + 1
                 for q in build_quat_seq(q_norm(self.curr_ori_wxyz), goal_wxyz, steps)[1:]:
                     self.move_to_pose(position, q[[1, 2, 3, 0]], 0.2)
                     self.motion_sleep(self.recovery_dt)

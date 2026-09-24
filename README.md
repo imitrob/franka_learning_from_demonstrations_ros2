@@ -84,14 +84,15 @@ ros2 launch skills_manager play_skill_launch.py name_skill:='action__object'
 
 Pose divergence pauses the active operation; it does not discard the trajectory.
 
-- **Small error:** when position error exceeds 5 cm or orientation error exceeds
-  0.05 rad (2.9°), stop advancing and wait for both errors to return within tolerance.
-- **Large error:** above 10 cm or 0.1 rad (5.7°), or after 5 seconds without tracking,
+- **Small error:** when position error exceeds 8 cm, stop advancing and wait for it to
+  return within tolerance. Orientation never stalls replay: contact tasks (door, probe)
+  settle about 9° off their recorded orientation.
+- **Large error:** above 15 cm or 0.3 rad (17°), or after 12 seconds without tracking,
   hold the measured pose and wait for explicit resume. Contact alone never pauses,
   because placing, inserting and spiral search touch on purpose; a stuck contact
-  pauses through the 5 s timeout. Resume is refused while libfranka reports contact.
-- A recorded waypoint that rotates more than 0.1 rad in one step is a command, not
-  divergence: the robot turns to it in 0.025 rad steps without pausing.
+  pauses through the 12 s timeout. Resume is refused while libfranka reports contact.
+- A recorded waypoint that rotates more than 0.3 rad in one step is a command, not
+  divergence: the robot turns to it in 0.0375 rad steps without pausing.
 - Clear the obstruction and check the path before resuming. Press **Space** while
   the keyboard listener is active, or call:
 
@@ -128,10 +129,10 @@ Known issues, not fixed yet:
   so a carried object can drop.
 
 Calibration attributes on `Panda`: `attractor_distance_threshold` (m),
-`tracking_angle_tolerance` (rad), `position_recovery_limit` (m),
+`position_recovery_limit` (m),
 `orientation_recovery_limit` (rad), `tracking_timeout` (s), and `recovery_dt` (s).
 Default recovery pacing is 0.05 s per step, with at most 2 mm translation and
-0.025 rad rotation per step. Validate the thresholds, speed, payload, and contact
+0.0375 rad rotation per step. Validate the thresholds, speed, payload, and contact
 settings on the robot before use; hardware-free tests do not establish physical safety.
 
 ### Commands during demonstration

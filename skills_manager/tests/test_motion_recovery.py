@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import quaternion
 
-from panda_control.panda import Panda, MotionCanceled, MotionError, HIGH_ORI_DIFFERENCE
+from panda_control.panda import Panda, MotionCanceled, MotionError, HIGH_ORI_DIFFERENCE, MAX_ORI_STEP
 from panda_control.pose_transform_functions import min_angle_condition, pos_quat_2_pose_st
 from skills_manager.lfd import LfD
 
@@ -163,12 +163,12 @@ def test_stop_cannot_be_overwritten_and_requires_acknowledgement():
 def test_controller_detects_tracking_jump_and_keeps_servicing_stop():
     robot = Robot()
     robot.move_to_pose_with_stampedpose(pose(0.04))
-    robot.position[0] = -0.1
+    robot.position[0] = -0.2
     robot._control_step(robot.ctrl)
     assert not robot._motion_cancel.is_set()
     assert robot._motion_fault == ""
     assert robot._recovery_requested.is_set() and robot._hold_done.is_set()
-    assert robot.commands[-1][0][0] == -0.1
+    assert robot.commands[-1][0][0] == -0.2
     assert "position=" in robot._recovery_reason and "orientation=" in robot._recovery_reason
 
 
@@ -180,7 +180,7 @@ def test_stationary_robot_pauses_then_continues_same_interpolation(method):
             assert robot._hold_done.wait(2)
             assert not future.done() and robot._operation_depth == 1
             assert robot._motion_fault == "" and not robot._motion_cancel.is_set()
-            assert robot._recovery_reason == "Tracking timed out"
+            assert robot._recovery_reason.startswith("Tracking timed out")
             robot.follow = True
             assert robot.resume_motion()
             future.result(timeout=3)
@@ -216,7 +216,7 @@ def test_tracking_lag_recovers_but_republishing_does_not_reset_deadline():
     with patch("panda_control.panda.time.monotonic", return_value=3.0):
         robot._control_step(robot.ctrl)
     assert robot._recovery_requested.is_set()
-    assert robot._recovery_reason == "Tracking timed out"
+    assert robot._recovery_reason.startswith("Tracking timed out")
     assert not robot._motion_cancel.is_set()
 
 
@@ -352,7 +352,7 @@ def test_large_divergence_holds_until_consent_then_interpolates_from_measured_po
     assert np.allclose(recovery[0][0], start_pos)
     assert min_angle_condition(recovery[0][1], start_ori) < 1e-7
     assert all(np.linalg.norm(a[0] - b[0]) <= 0.002001 for a, b in zip(recovery, recovery[1:]))
-    assert all(min_angle_condition(a[1], b[1]) <= HIGH_ORI_DIFFERENCE / 4 + 1e-7
+    assert all(min_angle_condition(a[1], b[1]) <= MAX_ORI_STEP + 1e-7
                for a, b in zip(recovery, recovery[1:]))
     assert robot.position[0] == pytest.approx(target.pose.position.x)
     assert robot._recovery_target is None and robot._motion_fault == ""
@@ -403,7 +403,7 @@ def test_obstruction_during_recovery_preserves_original_target_and_waits_again()
             assert robot._hold_done.wait(2)
             saved = robot._recovery_target
             assert robot.resume_motion()
-            wait_until(lambda: robot._recovery_reason == "Tracking timed out" and robot._hold_done.is_set())
+            wait_until(lambda: robot._recovery_reason.startswith("Tracking timed out") and robot._hold_done.is_set())
             assert not future.done() and robot._recovery_target == saved
             assert not robot._resume_requested.is_set()
             robot.follow = True
@@ -443,7 +443,7 @@ def test_large_recorded_rotation_turns_in_guarded_steps_without_pause():
         future.result(timeout=3)
     assert robot._recovery_target is None and not robot._hold_done.is_set()
     turns = [o for _, o in robot.commands]
-    assert all(min_angle_condition(a, b) <= HIGH_ORI_DIFFERENCE / 4 + 1e-7
+    assert all(min_angle_condition(a, b) <= MAX_ORI_STEP + 1e-7
                for a, b in zip(turns, turns[1:]))
     assert min_angle_condition(robot.orientation, [0., 0., math.sin(0.385), math.cos(0.385)]) < 1e-6
 
@@ -587,3 +587,25 @@ def test_controller_follows_hand_guidance_without_requesting_recovery():
     assert robot._recovery_target is None
     assert np.allclose(robot.commands[-1][0], robot.position)
     assert np.allclose(robot.commands[-1][1], robot.orientation)
+
+
+def test_packet_loss_restart_keeps_operation_but_repeat_is_fatal():
+    robot = Robot()
+    robot.get_logger = lambda: SimpleNamespace(warning=lambda *_: None, error=lambda *_: None)
+    robot.goal_position, robot.goal_orientation = np.zeros(3), np.array([0., 0., 0., 1.])
+    loss = RuntimeError('motion aborted by reflex! ["communication_constraints_violation"]')
+    robot._controller_ready.clear()
+    robot._controller_failed(loss)
+    assert not robot.safety_checker()  # waits, trajectory does not advance
+    robot._controller_ready.set()
+    assert robot.safety_checker() and robot.goal_position is not None
+    robot._controller_failed(loss)
+    with pytest.raises(MotionError, match="Controller failed"):
+        robot.safety_checker()
+
+
+def test_orientation_lag_below_hard_limit_does_not_stall_replay():
+    robot = Robot()
+    robot.move_to_pose_with_stampedpose(pose(0.0, angle=0.2))  # contact task settles ~9 deg off
+    assert robot.safety_checker()
+    assert not robot._recovery_requested.is_set()
