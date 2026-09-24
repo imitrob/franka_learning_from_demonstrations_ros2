@@ -1,3 +1,6 @@
+import os
+import subprocess
+import time
 import numpy as np
 import cv2
 from visualization_msgs.msg import Marker
@@ -9,9 +12,40 @@ from cv_bridge import CvBridgeError, CvBridge
 CAMERA_INFO_TOPIC = "/camera/color/camera_info"
 CAMERA_COLOR_TOPIC = "/camera/color/image_raw"
 
+CAMERA_DIAG_DIR = os.path.expanduser("~/.ros/log/camera_failures")
+CAMERA_DIAG_CMD = r"""
+date
+echo '### image topic'; timeout 5 ros2 topic info -v /camera/color/image_raw
+echo '### image hz (empty = nothing arrives)'; timeout 4 ros2 topic hz /camera/color/image_raw
+echo '### camera_info hz'; timeout 4 ros2 topic hz /camera/color/camera_info
+echo '### nodes'; timeout 5 ros2 node list
+echo '### Fast DDS shared-memory segments'; ls -la --time-style=full-iso /dev/shm | grep -i fastrtps
+echo '### USB devices with vendor 8086'
+for d in /sys/bus/usb/devices/*; do
+  [ "$(cat $d/idVendor 2>/dev/null)" = 8086 ] && echo "$d $(cat $d/product) speed=$(cat $d/speed)Mbps power/control=$(cat $d/power/control) runtime_status=$(cat $d/power/runtime_status)"
+done
+echo "usbcore autosuspend=$(cat /sys/module/usbcore/parameters/autosuspend)"
+echo '### lsusb -t'; lsusb -t
+echo '### kernel log, last 30 min'; journalctl -k --since -30min --no-pager
+echo '### newest realsense launch.log, tail'
+tail -n 300 "$(ls -t ~/.ros/log/*/launch.log | xargs grep -l realsense2_camera | head -1)"
+"""
+
+def dump_camera_diagnostics():
+    """Save a snapshot of ROS/USB/kernel state for debugging a stalled camera; returns the file path."""
+    os.makedirs(CAMERA_DIAG_DIR, exist_ok=True)
+    path = os.path.join(CAMERA_DIAG_DIR, time.strftime("%Y-%m-%d-%H-%M-%S.log"))
+    try:
+        with open(path, "w") as f:
+            subprocess.run(["bash", "-c", CAMERA_DIAG_CMD], stdout=f, stderr=subprocess.STDOUT, timeout=60)
+    except Exception as e:  # diagnostics must never hide the camera error itself
+        with open(path, "a") as f:
+            f.write(f"\ndiagnostics failed: {e!r}\n")
+    return path
+
 def image_process(image, ds_factor, row_crop_top, row_crop_bottom, col_crop_left, col_crop_right):
     if image is None:
-        raise Exception("Camera is not sending images!")
+        raise Exception(f"Camera is not sending images! Diagnostics saved to {dump_camera_diagnostics()}")
     h, w = image.shape[:2] # Run camera node: ros2 
 
     # Define the new dimensions
