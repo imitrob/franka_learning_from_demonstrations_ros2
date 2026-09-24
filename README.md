@@ -82,8 +82,11 @@ Pose divergence pauses the active operation; it does not discard the trajectory.
 - **Small error:** when position error exceeds 5 cm or orientation error exceeds
   0.05 rad (2.9°), stop advancing and wait for both errors to return within tolerance.
 - **Large error:** above 10 cm or 0.1 rad (5.7°), or after 5 seconds without tracking,
-  hold the measured pose and wait for explicit resume. Contact reported by libfranka
-  while outside tracking tolerance also requests this hold.
+  hold the measured pose and wait for explicit resume. Contact alone never pauses,
+  because placing, inserting and spiral search touch on purpose; a stuck contact
+  pauses through the 5 s timeout. Resume is refused while libfranka reports contact.
+- A recorded waypoint that rotates more than 0.1 rad in one step is a command, not
+  divergence: the robot turns to it in 0.025 rad steps without pausing.
 - Clear the obstruction and check the path before resuming. Press **Space** while
   the keyboard listener is active, or call:
 
@@ -91,21 +94,33 @@ Pose divergence pauses the active operation; it does not discard the trajectory.
   ros2 service call /lfd/resume_motion std_srvs/srv/Trigger '{}'
   ```
 
-  Notebook callers can use `robot.resume_motion()`. A successful response accepts
-  the recovery request; it does not mean recovery has finished.
-- Recovery uses slow IK-assisted Cartesian interpolation from the current measured
-  pose to the saved waypoint, then continues the same operation. It does not replay
-  gripper actions. An unreachable target or another tracking timeout leaves the
-  operation paused until another explicit resume or cancellation.
+  Notebook callers can use `robot.resume_motion()` from another thread. A successful
+  response accepts the recovery request; it does not mean recovery has finished.
+- Resume moves in a slow straight Cartesian line from the current measured pose to the
+  saved waypoint, then continues the same operation. IK only checks that the waypoint
+  itself is reachable; it does not plan the path. Gripper actions are not replayed.
+  An unreachable target or another tracking timeout leaves the operation paused.
+  Press **e** to end a paused skill execution, or **Esc** / cancel the action.
+- A pause during active localization discards that localization result and localizes
+  again from the recovered pose.
 - Other robot operations remain rejected while recovery owns the robot.
-  `/lfd/operation_status` reports `waiting_for_tracking`, `paused_tracking`, or
-  `recovering`. **Esc** and action cancellation still cancel, rather than resume.
+  `/lfd/operation_status` reports `waiting_for_tracking` (after 1 s), `paused_tracking`,
+  or `recovering`; an idle server whose controller stopped reports
+  `controller_unavailable`. The skills dashboard shows these phases.
 
-The destination can be far away; interpolation keeps each controller target close
-to the measured pose. IK is not collision checking. No automatic trajectory
-reversal or obstacle avoidance is provided. Invalid poses and controller faults
-still fail the operation. Hand-guided recording does not treat deliberate manual
-movement as tracking failure or command roll correction.
+No automatic trajectory reversal, obstacle avoidance or collision checking is provided.
+Invalid poses and controller faults, including libfranka reflexes, still fail the
+operation. Hand-guided recording does not treat deliberate manual movement as tracking
+failure or command roll correction.
+
+Known issues, not fixed yet:
+- Keys `m`, `n`, `c`, `o` (and Desk buttons mapped to them) move the robot or gripper
+  from the keyboard thread. An exception there stops the listener, so Space and Esc
+  stop working for the rest of that operation.
+- The keyboard listener is global: Space typed in any window resumes a pause. Outside
+  a pause, Space toggles `pause` instead.
+- Esc, cancel and failed operations call `gripper.stop()`, which releases grasp force,
+  so a carried object can drop.
 
 Calibration attributes on `Panda`: `attractor_distance_threshold` (m),
 `tracking_angle_tolerance` (rad), `position_recovery_limit` (m),

@@ -259,8 +259,8 @@ class Panda():
         with self._motion_lock:
             if reached:
                 self._tracking_since = None
-            elif self.contact_detected:
-                self._request_recovery("Contact while tracking")
+            # ponytail: contact alone never pauses; place/insert/spiral touch on purpose.
+            # A stuck contact still pauses through tracking_timeout.
             elif self._tracking_since is None:
                 self._tracking_since = time.monotonic()
             elif time.monotonic() - self._tracking_since >= self.tracking_timeout:
@@ -829,12 +829,21 @@ class Panda():
             with self._motion_lock:
                 self.check_motion()
                 distance, angle = self._validate_target(position, orientation)
-                if not self._teaching and (distance > self.position_recovery_limit or angle > self.orientation_recovery_limit):
+                if not self._teaching and distance > self.position_recovery_limit:
                     self._request_recovery(
                         f"Tracking limit exceeded: position={distance:.4f} m, orientation={angle:.4f} rad",
                         position, orientation)
-                if not self._recovery_requested.is_set():
+                turn = (not self._teaching and angle > self.orientation_recovery_limit
+                        and not self._recovery_requested.is_set())
+                if not self._recovery_requested.is_set() and not turn:
                     return
+            if turn:
+                # A fast recorded rotation is a command, not divergence: turn in guarded steps.
+                goal_wxyz = q_norm(np.asarray(orientation)[[3, 0, 1, 2]])
+                steps = math.ceil(angle / (self.orientation_recovery_limit / 4)) + 1
+                for q in build_quat_seq(q_norm(self.curr_ori_wxyz), goal_wxyz, steps)[1:]:
+                    self.move_to_pose(position, q[[1, 2, 3, 0]], 0.2)
+                    self.motion_sleep(self.recovery_dt)
 
     def move_to_pose(self, position: Iterable[float], orientation: Iterable[float], speed_factor: float):
         while True:

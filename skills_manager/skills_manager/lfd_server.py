@@ -306,8 +306,11 @@ class LfDServer(LfD):
                 if self._recovery_target is not None:
                     message.phase = "paused_tracking" if self._recovery_requested.is_set() else "recovering"
                     message.message = self._recovery_reason
-                elif self._tracking_since is not None:
+                elif time.monotonic() - (self._tracking_since or math.inf) > 1.0:  # skip normal lag
                     message.phase = "waiting_for_tracking"
+            elif self._operation_mode == OperationStatus.IDLE and not self._controller_ready.is_set():
+                message.phase = "controller_unavailable"
+                message.message = self._motion_fault or "Robot controller is not running"
         self._status_pub.publish(message)
 
     def _finish_operation(self, cleanup_error="", outcome="completed"):
@@ -721,6 +724,8 @@ class LfDServer(LfD):
             elif self._operation_mode == OperationStatus.CAPTURING_TEMPLATE:
                 expired = self._lease_deadline and time.monotonic() > self._lease_deadline
                 finished = self._lease_released.is_set()
+            elif self._operation_mode == OperationStatus.EXECUTING and self.end:
+                raise _OperationCanceled("Ended by operator while paused")
             else:
                 return
         if expired or finished:
@@ -731,7 +736,6 @@ class LfDServer(LfD):
 
     def _raise_record_stop(self, goal_handle):
         self.check_motion()
-        self._recover_motion()
         if goal_handle.is_cancel_requested or not rclpy.ok():
             raise _OperationCanceled("canceled")
         with self._state_lock:
@@ -741,6 +745,7 @@ class LfDServer(LfD):
             self._record_timed_out = bool(timed_out)
         if timed_out:
             raise _OperationTimedOut()
+        self._recover_motion()
 
     def _finish_recording_callback(self, request, response):
         with self._state_lock:
@@ -951,8 +956,8 @@ class LfDServer(LfD):
 
     def _raise_if_canceled(self, goal_handle):
         self.check_motion()
-        self._recover_motion()
         if not goal_handle.is_cancel_requested:
+            self._recover_motion()
             return
         try:
             self.stop()

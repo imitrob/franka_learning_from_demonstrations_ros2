@@ -421,6 +421,39 @@ def test_recovery_keeps_admission_and_publishes_pause_then_recovery():
     assert messages[-1].phase == "accepted" and server._operation_id == operation_id
 
 
+def test_status_reports_lasting_tracking_wait_and_dead_controller():
+    server = _AdmissionServer()
+    messages = []
+    server._status_pub = SimpleNamespace(publish=messages.append)
+    server._operation_mode = OperationStatus.EXECUTING
+    server._operation_phase = "executing"
+    server._tracking_since = time.monotonic()
+    server._publish_operation_status()
+    assert messages[-1].phase == "executing"  # Normal lag does not flicker the dashboard.
+    server._tracking_since = time.monotonic() - 2
+    server._publish_operation_status()
+    assert messages[-1].phase == "waiting_for_tracking"
+    server._operation_mode = OperationStatus.IDLE
+    server._controller_ready.clear()
+    server._motion_fault = "Could not stop controller: reflex"
+    server._publish_operation_status()
+    assert messages[-1].phase == "controller_unavailable"
+    assert "reflex" in messages[-1].message
+
+
+def test_end_key_ends_paused_execution_without_moving():
+    from panda_control.panda import MotionCanceled
+    server = _RecoveryServer()
+    server._operation_mode = OperationStatus.EXECUTING
+    server._request_recovery("test", [0.2, 0., 0.], [0., 0., 0., 1.])
+    with recovering_operation(server, server._recover_motion) as future:
+        assert server._hold_done.wait(1)
+        server.end = 1  # the "e" key
+        with pytest.raises(MotionCanceled, match="Ended by operator"):
+            future.result(timeout=1)
+    assert all(np.array_equal(p, np.zeros(3)) for p, _ in server.commands)
+
+
 @pytest.mark.parametrize("phase", ["failed", "canceled", "timed_out"])
 def test_terminal_status_wins_over_recovery_and_tracking(phase):
     server = _AdmissionServer()
@@ -493,6 +526,88 @@ def test_recovery_observes_expiry_without_moving(mode, deadline, resume):
         with pytest.raises(_OperationTimedOut):
             future.result(timeout=1)
     assert moves == []
+
+
+@pytest.mark.parametrize("mode,deadline", [
+    (OperationStatus.RECORDING_SKILL, "_record_deadline"),
+    (OperationStatus.CAPTURING_TEMPLATE, "_lease_deadline"),
+])
+def test_deadline_expiry_during_recovery_reestablishes_hold(mode, deadline):
+    server = _RecoveryServer()
+    server._operation_mode = mode
+    setattr(server, deadline, time.monotonic() + 30)
+    server._request_recovery("test", [0.2, 0., 0.], [0., 0., 0., 1.])
+    def recover(*a, **kw):
+        assert server._recovering
+        setattr(server, deadline, time.monotonic() - 1)
+        server.move_to_pose([0.01, 0., 0.], [0., 0., 0., 1.], 0.2)
+    server.go_to_pose_ik = recover
+    with recovering_operation(server, server._recover_motion) as future:
+        assert server._hold_done.wait(1)
+        assert server.resume_motion()
+        with pytest.raises(_OperationTimedOut):
+            future.result(timeout=1)
+        assert server._recovery_requested.is_set() and server._hold_done.is_set()
+        assert not server._recovering
+        assert all(np.array_equal(p, np.zeros(3)) for p, _ in server.commands)
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_finish_recording_during_recovery_uses_normal_save_policy(started):
+    server = _RecoveryServer()
+    server._operation_mode = OperationStatus.RECORDING_SKILL
+    server._recording_id = "recording"
+    server._record_deadline = time.monotonic() + 30
+    server._start_inputs = server._stop_inputs = server._restore_normal_stiffness = lambda: None
+    server._queue_signalizer = server._validate_template = lambda _: None
+    server._record_feedback = lambda *a: None
+    saved = []
+    server.save = lambda name, **kw: saved.append(name)
+    def pause():
+        server._request_recovery("test", [0.2, 0., 0.], [0., 0., 0., 1.])
+        server._recover_motion()
+        pytest.fail("finish must unwind recovery without resuming")
+    server.localize = lambda _: None if started else pause()
+    def record(**kw):
+        kw["on_phase"]("recording")
+        pause()
+    server.traj_rec = record
+    goal = _Goal()
+    goal.request = SimpleNamespace(skill_name="pick__cube", template_name="cube",
+                                   home_before_recording=False, overwrite_existing=False)
+    with recovering_operation(server, lambda: server._record_callback(goal)) as future:
+        assert server._hold_done.wait(1)
+        response = server._finish_recording_callback(
+            SimpleNamespace(recording_id="recording"), SimpleNamespace())
+        assert response.success
+        result = future.result(timeout=1)
+        assert goal.status == "succeeded"
+        assert saved == (["pick__cube"] if started else [])
+        assert bool(result.saved_path) == started
+        assert server._operation_mode == OperationStatus.IDLE
+        assert all(np.array_equal(p, np.zeros(3)) for p, _ in server.commands)
+
+
+def test_releasing_reservation_during_recovery_completes_without_resume():
+    server = _RecoveryServer()
+    server._operation_mode = OperationStatus.CAPTURING_TEMPLATE
+    server._lease_id = "lease"
+    server.home = lambda: None
+    server.offset_compensator = server._queue_signalizer = lambda _: None
+    def feedback(_goal, phase):
+        if phase == "ready":
+            server._request_recovery("test", [0.2, 0., 0.], [0., 0., 0., 1.])
+    server._reserve_feedback = feedback
+    goal = _Goal()
+    with recovering_operation(server, lambda: server._reserve_callback(goal)) as future:
+        assert server._hold_done.wait(1)
+        response = server._release_reservation_callback(
+            SimpleNamespace(lease_id="lease"), SimpleNamespace())
+        assert response.success
+        result = future.result(timeout=1)
+        assert goal.status == "succeeded" and "released" in result.message
+        assert server._operation_mode == OperationStatus.IDLE
+        assert all(np.array_equal(p, np.zeros(3)) for p, _ in server.commands)
 
 
 def test_resume_service_reports_admission_and_backend_errors():

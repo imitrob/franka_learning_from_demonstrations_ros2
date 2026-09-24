@@ -960,8 +960,8 @@ def test_object_poses_reach_the_scene_topic(scene_topic):
 
 
 def test_publishing_is_off_until_asked(scene):
-    """start/stop_publishing_scene are the switch lfd.py and
-    SceneGetterViaObjectLocalizer throw, and both check .success -- which
+    """start/stop_publishing_scene are the switch
+    SceneGetterViaObjectLocalizer throws, and both check .success -- which
     Trigger.Response defaults to False."""
     from object_localization.active_localizer import ActiveLocalizerNode
     from std_srvs.srv import Trigger

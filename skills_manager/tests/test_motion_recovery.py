@@ -330,7 +330,7 @@ def test_playback_pause_preserves_index_samples_and_gripper_then_resumes():
     assert len(gripper_calls) == 1  # Recovery does not replay the waypoint's gripper action.
 
 
-@pytest.mark.parametrize("target", [pose(0.3), pose(0, math.pi), pose(0.3, math.pi)])
+@pytest.mark.parametrize("target", [pose(0.3), pose(0.3, math.pi)])
 def test_large_divergence_holds_until_consent_then_interpolates_from_measured_pose(target):
     robot = Robot()
     with patch("panda_control.panda.rtb.models.Panda", return_value=ik_model()):
@@ -436,15 +436,28 @@ def test_explicit_stop_cancels_instead_of_resuming(during_recovery):
     assert all(p[0] == 0 for p, _ in robot.commands)
 
 
-def test_contact_escalates_small_error_and_prevents_resume_until_clear():
+def test_large_recorded_rotation_turns_in_guarded_steps_without_pause():
+    robot = Robot()
+    robot.follow = True
+    with running(robot, lambda: robot.move_to_pose_with_stampedpose(pose(0, 0.77))) as future:
+        future.result(timeout=3)
+    assert robot._recovery_target is None and not robot._hold_done.is_set()
+    turns = [o for _, o in robot.commands]
+    assert all(min_angle_condition(a, b) <= HIGH_ORI_DIFFERENCE / 4 + 1e-7
+               for a, b in zip(turns, turns[1:]))
+    assert min_angle_condition(robot.orientation, [0., 0., math.sin(0.385), math.cos(0.385)]) < 1e-6
+
+
+def test_contact_does_not_pause_but_prevents_resume_until_clear():
     robot = Robot()
     state = robot.panda.get_state()
     state.cartesian_contact[0] = True
     robot.panda.get_state = lambda: state
     robot.move_to_pose([0.07, 0., 0.], [0., 0., 0., 1.], 0.2)
     robot._control_step(robot.ctrl)
-    assert robot._recovery_reason == "Contact while tracking" and robot._hold_done.is_set()
-    assert robot.commands[-1][0][0] == 0
+    assert robot._recovery_target is None and robot.commands[-1][0][0] == 0.07
+    robot._request_recovery("test")
+    robot._control_step(robot.ctrl)
     assert not robot.resume_motion()
     state.cartesian_contact[0] = False
     assert robot.resume_motion()
@@ -497,7 +510,9 @@ def test_localization_deadline_excludes_recovery_and_discards_new_poses_while_pa
     def done():
         polls.append(True)
         return len(polls) > 1
+    sent = []
     def send(_):
+        sent.append(True)
         robot.external_call(pose(0.2))
         return SimpleNamespace(done=done, result=lambda: "localized")
     # Exercise the service wait with a correction that requires explicit recovery.
@@ -515,6 +530,23 @@ def test_localization_deadline_excludes_recovery_and_discards_new_poses_while_pa
             assert future.result(timeout=3) == "localized"
     assert robot._recovery_elapsed == 100.0
     assert robot.position[0] == pytest.approx(0.2)
+    assert len(sent) == 2  # The answer computed while paused is discarded; localize again.
+
+
+def test_abandoned_localization_blocks_only_until_its_timeout():
+    robot = Robot()
+    pending = SimpleNamespace(done=lambda: False)
+    removed = []
+    client = SimpleNamespace(remove_pending_request=removed.append,
+                             call_async=lambda _: SimpleNamespace(done=lambda: True, result=lambda: "ok"))
+    robot._localization_future = pending
+    robot._localization_deadline = time.monotonic() + 30
+    with patch("panda_control.panda.rclpy.ok", return_value=True):
+        with pytest.raises(RuntimeError, match="still running"):
+            LfD.call_motion_service(robot, client, object(), localizing=True)
+        robot._localization_deadline = time.monotonic() - 1
+        assert LfD.call_motion_service(robot, client, object(), localizing=True) == "ok"
+    assert removed == [pending]
 
 
 def test_kinesthetic_recording_does_not_correct_or_reject_manual_roll():

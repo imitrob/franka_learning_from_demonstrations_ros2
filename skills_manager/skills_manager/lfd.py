@@ -53,8 +53,6 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
         self.set_localizer_client = self.create_client(SetTemplate, 'set_localizer', callback_group=self.callback_group)
         self.active_localizer_client = self.create_client(Trigger, 'active_localizer', qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
-        self.start_publishing_scene_call = self.create_client(Trigger, 'start_publishing_scene', qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
-        self.stop_publishing_scene_call = self.create_client(Trigger, 'stop_publishing_scene', qos_profile=QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT), callback_group=self.callback_group)
 
         time.sleep(1)
 
@@ -294,7 +292,10 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.check_motion()
         previous = getattr(self, "_localization_future", None)
         if localizing and previous is not None and not previous.done():
-            raise RuntimeError("Previous localization is still running")
+            if time.monotonic() < self._localization_deadline:
+                raise RuntimeError("Previous localization is still running")
+            # ponytail: a reply this late is lost (localizer restarted or dropped it).
+            client.remove_pending_request(previous)
         deadline = time.monotonic() + timeout
         recovery_elapsed = self._recovery_elapsed
         with self._motion_lock:
@@ -320,9 +321,18 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                          pose.pose.orientation.z, pose.pose.orientation.w])
                     self.go_to_pose_ik_quick(pose)
                 if future.done():
+                    if localizing and self._recovery_elapsed != recovery_elapsed:
+                        # Poses were dropped while paused, so the localizer's answer
+                        # does not match the robot pose. Localize again from here.
+                        deadline = time.monotonic() + timeout
+                        recovery_elapsed = self._recovery_elapsed
+                        future = self._localization_future = client.call_async(request)
+                        continue
                     return future.result()
                 self.motion_sleep(0.01)
         finally:
+            if localizing:  # an abandoned localizer gets `timeout` to finish its loop
+                self._localization_deadline = time.monotonic() + timeout
             with self._motion_lock:
                 self._accept_localizer_goals = False
                 self.external_call_msg = None
@@ -515,11 +525,3 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.recorded_img = np.r_[self.recorded_img, self.pub_rec_image()]
         self.recorded_img_feedback_flag = np.c_[self.recorded_img_feedback_flag, self.img_feedback_flag]
         self.recorded_spiral_flag = np.c_[self.recorded_spiral_flag, self.spiral_flag]
-
-    def start_publishing_scene(self):
-        self.start_publishing_scene_call.call(Trigger.Request())
-
-    def stop_publishing_scene(self):
-        self.stop_publishing_scene_call.call(Trigger.Request())
-
-
