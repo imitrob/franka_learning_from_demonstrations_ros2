@@ -1120,12 +1120,12 @@ class LfDServer(LfD):
         return f"Task {task.command!r} {outcome}{suffix}"
 
 
-def main():
+def main(server_class=LfDServer):
     rclpy.init()
     server = None
     failed = False
     try:
-        server = LfDServer()
+        server = server_class()
         server.start()
         server.get_logger().info(
             "LfD server ready: execute, record, home, and template reservation"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -26,9 +26,18 @@ def generate_launch_description():
         default_value="30.0",
         description="Seconds without a template-capture heartbeat before release",
     )
+    risk_aware = DeclareLaunchArgument(
+        "risk_aware",
+        default_value="true",
+        description="Branch on the switcher's decisions when it runs (ralfd_server); "
+                    "false runs the plain lfd_server",
+    )
     server = Node(
         package="skills_manager",
-        executable="lfd_server",
+        executable=PythonExpression([
+            "'ralfd_server' if '", LaunchConfiguration("risk_aware"),
+            "'.lower() == 'true' else 'lfd_server'",
+        ]),
         name="lfd_server",
         output="screen",
         parameters=[{
@@ -49,5 +58,6 @@ def generate_launch_description():
         home_orientation_tolerance,
         record_heartbeat_timeout,
         template_lease_timeout,
+        risk_aware,
         server,
     ])
