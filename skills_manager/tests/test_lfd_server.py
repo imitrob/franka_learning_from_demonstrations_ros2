@@ -346,3 +346,46 @@ def test_release_home_checks_position_and_orientation():
 
     assert at_home.events == ["open"]
     assert wrong_orientation.events == ["open", "home"]
+
+
+class _KeyServer(_ExecutionServer):
+    """Real _execute_part: 'e' ends the replay, space pauses it."""
+    _execute_part = LfDServer._execute_part
+    loaded_trajectory_len = 5
+
+    def load(self, _name):
+        pass
+
+    def player_init(self):
+        self.time_index, self.end, self.pause = 0, False, True
+        threading.Timer(0.1, lambda: setattr(self, "pause", False)).start()
+
+    def player_step(self):
+        assert not self.pause
+        self.time_index += 1
+        self.end = self.time_index == 2
+
+
+def test_space_pauses_and_e_ends_replay_without_ros_cancel():
+    server = _KeyServer()
+    goal = _Goal()
+
+    result = server._execute_task(goal, _task("pick", ["cube"]))
+
+    assert server.time_index == 2
+    assert goal.status == "aborted" and "ended by operator" in result.message
+    assert server.events[-1] == ("finish", "", "canceled")
+
+
+def test_idle_status_reports_controller_error_and_watcher_republishes():
+    server = _AdmissionServer()
+    published = []
+    server._status_pub = SimpleNamespace(publish=published.append)
+    server._watch_controller()
+    assert published == []  # nothing changed
+    server.controller_error = "communication_constraints_violation"
+    server._watch_controller()
+    assert published[-1].phase == "controller_unavailable"
+    server.controller_error = ""
+    server._watch_controller()
+    assert published[-1].phase == "idle" and len(published) == 2

@@ -12,7 +12,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
 # from franka_gripper.msg import GraspActionGoal, HomingActionGoal, StopActionGoal, MoveActionGoal
-from panda_control.pose_transform_functions import  pos_quat_2_pose_st, list_2_quaternion, pose_2_transformation, interpolate_poses, q_norm, q_angle, q_slerp, build_quat_seq, min_angle_condition, step_slerp 
+from panda_control.pose_transform_functions import  pos_quat_2_pose_st, list_2_quaternion, pose_2_transformation, interpolate_poses, q_norm, q_angle, q_slerp, build_quat_seq, step_slerp 
 from spatialmath import SE3 #pip install spatialmath-python
 from spatialmath.base import q2r
 import roboticstoolbox as rtb #pip install roboticstoolbox-python
@@ -37,7 +37,6 @@ UPDATE_THREAD_INTERVAL = 1.0 # s
 TF_BROADCAST_INTERVAL = 0.01 # s
 OPEN_GRIPPER_WIDTH = 0.06 # How much gripper opens [m]
 HIGH_POINT_DIFFERENCE = 0.1 # m
-HIGH_ORI_DIFFERENCE = 0.01
 JOINT_NAMES = [f"panda_joint{i}" for i in range(1, 8)] + [
     "panda_finger_joint1", "panda_finger_joint2"]
 
@@ -66,6 +65,8 @@ LOAD_INERTIA = [0.001, 0.0, 0.0,
 LOAD_MASS = False
 
 class Panda():
+    controller_error = ""  # last libfranka error while the controller is down
+
     def __init__(self,
                  K_pos: int = 1000, # Default Positional stiffness
                  K_ori: int = 30, # Default Orientation stiffness
@@ -525,29 +526,17 @@ class Panda():
                 self.go_home_flag = False
             ctrl = controllers.CartesianImpedance(filter_coeff=0.05, impedance=np.diag([self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z]), nullspace_stiffness=self.nullspace_stiffness, damping_ratio=0.3)
             # print("New ctrl:", self.translational_stiffness_X, self.translational_stiffness_Y, self.translational_stiffness_Z, self.rotational_stiffness_X, self.rotational_stiffness_Y, self.rotational_stiffness_Z)
-            self.panda.start_controller(ctrl)
             try:
+                self.panda.start_controller(ctrl)
                 with self.panda.create_context(frequency=frequency, max_runtime=999) as ctx:
+                    self.controller_error = ""
                     self.break_control_done.set()
                     while ctx.ok():
                         if (self.goal_position is not None) and (self.goal_orientation is not None) and (self.curr_ori_xyzw is not None):
-                            if (np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos)) > HIGH_POINT_DIFFERENCE) or \
-                                min_angle_condition(self.goal_orientation, self.curr_ori_xyzw) > HIGH_ORI_DIFFERENCE:
+                            if (np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos)) > HIGH_POINT_DIFFERENCE):
                                 
-                                self.get_logger().warning(f"contror high set point difference {np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos))}  {min_angle_condition(self.goal_orientation, self.curr_ori_xyzw) > HIGH_ORI_DIFFERENCE}")
+                                self.get_logger().warning(f"contror high set point difference {np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos))}")
 
-                                # direction = (np.array(self.goal_position) - np.array(self.curr_pos)) / np.linalg.norm(np.array(self.goal_position) - np.array(self.curr_pos))
-                                # new_goal_position = self.curr_pos + direction * HIGH_POINT_DIFFERENCE * 0.5
-                                
-                                # new_goal_orientation = step_slerp(
-                                #     self.goal_orientation,
-                                #     self.curr_ori_xyzw, 
-                                #     HIGH_ORI_DIFFERENCE * 0.5,
-                                # )
-
-                                # self.get_logger().warning(f"{self.curr_pos}, {self.curr_ori_xyzw}, || , {new_goal_position}, {new_goal_orientation}")
-
-                                # ctrl.set_control(new_goal_position, new_goal_orientation)
                                 time.sleep(0.001) # Needed! Enforce consistent rate on non rt PC                        
                                 continue
 
@@ -561,7 +550,9 @@ class Panda():
                             self.panda.stop_controller()
                             break
             except RuntimeError as e:
+                self.controller_error = str(e)
                 print(f"Recovering from libfranka exception: {str(e)}", flush=True)
+                time.sleep(0.1)  # a controller that cannot start must not spin this loop
 
     def move_to_pose(self, 
                      position: Iterable[float], # xyz

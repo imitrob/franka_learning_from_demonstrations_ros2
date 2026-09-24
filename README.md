@@ -54,6 +54,11 @@ You can now record a demonstration with:
 ros2 launch skills_manager record_skill_launch.py name_skill:='action__object'
 ```
 This asks the persistent `lfd_server` to home, localize `object`, and record.
+`ros2 launch skills_manager lfd_server_launch.py` starts it. By default this is the
+risk-aware `ralfd_server`: while the `nocode_robot_programming` switcher runs, a play
+follows its branch decisions and saves `_trial_` archives; otherwise it replays as
+recorded. `risk_aware:=false` starts the plain `lfd_server`, and an `ExecuteSkill` goal
+with `plain_replay: true` skips branching for that one command.
 Pass `homing:="false"` to record from wherever the arm already is.
 
 All the trajectories are saved in the folder `trajectory_data/trajectories/` with the name you gave to the skill.

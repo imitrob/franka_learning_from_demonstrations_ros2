@@ -1,6 +1,7 @@
 
 from dataclasses import dataclass
-import pathlib, cv2, os, time, math
+import pathlib, cv2, os, time, math, threading
+from functools import wraps
 import numpy as np
 from typing import Iterable, Tuple, List
 from copy import deepcopy
@@ -40,7 +41,26 @@ class Request():
             raise ValueError(f"Invalid action: '{self.action}'. Valid actions are: {self.valid_actions}")
 
 
+def robot_operation(method):
+    """Refuse to start a robot operation while another thread runs one; nesting is fine."""
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        if not self._operation_lock.acquire(blocking=False):
+            raise RuntimeError("Robot operation is already active")
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._operation_lock.release()
+    return run
+
+
 class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
+    # ponytail: one lock per class, fine for one robot per process.
+    _operation_lock = threading.RLock()
+    # Guard direct notebook calls as well as widget callbacks.
+    home = robot_operation(LfD.home)
+    traj_rec = robot_operation(LfD.traj_rec)
+    move_template_start = robot_operation(LfD.move_template_start)
 
     def __init__(self, estimator_risk_policy: str = 'ContinueRiskPolicy', risk_patience: int = 2,
                  save_ds_window: bool = False):
@@ -173,6 +193,7 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
     #         torch.tensor(frame_number, dtype=torch.float32).cuda() # 5. Frame number normalized (0-1)
     #     ]
 
+    @robot_operation
     def play_skill(self, name_skill, object_template_name, localize_box=True) -> List[Request]:
         
         self.request_log = []
@@ -255,6 +276,7 @@ class RALfD(JupyterWidgetPanel, RiskAwareFeedback, LfD):
             print("Keyboard interrupted", flush=True)
         return self.request_log
 
+    @robot_operation
     def execute(self) -> Request:
         ''' Has trajectory at self.loaded_traj, self.loaded_ori
         '''

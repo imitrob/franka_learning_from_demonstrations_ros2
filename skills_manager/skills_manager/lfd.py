@@ -30,7 +30,13 @@ class SkillVis():
     def show(self, name_skill: str):
         show_skill(name_skill)
 
+LOCALIZE_TIMEOUT = 30.0  # s; a localizer that never answers must not block forever
+
+
 class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode, SkillVis):
+    _localization_future = None
+    _localization_deadline = 0.0
+
     def __init__(self):
         super(LfD, self).__init__()
         self.freq = 10
@@ -294,7 +300,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
             print("Returned because localizer not succesful", flush=True)
             return False
         self.move_template_start()
-        active = self.active_localizer_client.call(Trigger.Request())
+        active = self._call_active_localizer()
         if active is None or not active.success:
             # The object is not where the template says it is: servoing produced
             # no delta, so the recorded trajectory would run against thin air.
@@ -302,6 +308,23 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
             print(f"Returned because localization failed: {reason}", flush=True)
             return False
         self.compute_final_transform()
+
+    def _call_active_localizer(self, timeout=LOCALIZE_TIMEOUT):
+        """Trigger active localization; None when the localizer does not answer in time."""
+        client = self.active_localizer_client
+        previous = self._localization_future
+        if previous is not None and not previous.done():
+            if time.monotonic() < self._localization_deadline:
+                raise RuntimeError("Previous localization is still running")
+            # ponytail: a reply this late is lost (localizer restarted or dropped it).
+            client.remove_pending_request(previous)
+        future = self._localization_future = client.call_async(Trigger.Request())
+        deadline = time.monotonic() + timeout
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # An abandoned localizer gets `timeout` more to finish its servoing loop.
+        self._localization_deadline = time.monotonic() + timeout
+        return future.result() if future.done() else None
 
     def play_skill(self, name_skill, object_template_name, localize_box=True):
         if localize_box:
@@ -312,7 +335,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                 print("Returned because localizer not succesful", flush=True)
                 return
             self.move_template_start()
-            self.active_localizer_client.call(Trigger.Request())
+            self._call_active_localizer()
             self.compute_final_transform()
         try:
             self.load(name_skill)

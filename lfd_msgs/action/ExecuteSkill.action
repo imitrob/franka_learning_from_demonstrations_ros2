@@ -1,5 +1,7 @@
 # Canonical SkillCommand JSON (action, objects, parameters, command).
 string skill_command_json
+# True replays the recording as-is even when the risk-aware server could branch.
+bool plain_replay
 ---
 # ROS action status carries succeeded/canceled/aborted; this explains it.
 string message

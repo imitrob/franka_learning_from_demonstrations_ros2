@@ -53,6 +53,8 @@ class _OperationTimedOut(Exception):
 
 
 class LfDServer(LfD):
+    _reported_controller_error = ""
+
     """Own one Panda and admit exactly one robot operation at a time."""
 
     def __init__(self):
@@ -193,6 +195,7 @@ class LfDServer(LfD):
             10,
             callback_group=self.callback_group,
         )
+        self.create_timer(1.0, self._watch_controller, callback_group=self.callback_group)
         self._publish_operation_status()
 
     # --- shared admission/state -----------------------------------------
@@ -274,7 +277,16 @@ class LfDServer(LfD):
             message.target = self._operation_target
             message.phase = self._operation_phase
             message.message = self._operation_message
+            self._reported_controller_error = self.controller_error
+            if self._operation_mode == OperationStatus.IDLE and self.controller_error:
+                message.phase = "controller_unavailable"
+                message.message = self.controller_error
         self._status_pub.publish(message)
+
+    def _watch_controller(self):
+        # Status is published on change only; the controller thread has no node to publish from.
+        if self.controller_error != self._reported_controller_error:
+            self._publish_operation_status()
 
     def _finish_operation(self, cleanup_error="", outcome="completed"):
         with self._state_lock:
@@ -455,7 +467,11 @@ class LfDServer(LfD):
                 result.message = self._result_message(
                     task, task_error or "canceled", completed
                 )
-                goal_handle.canceled()
+                # 'e' ends without a ROS cancel request, and canceled() needs one.
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                else:
+                    goal_handle.abort()
                 terminal_outcome = "canceled"
             elif task_error:
                 result.message = self._result_message(task, task_error, completed)
@@ -522,6 +538,7 @@ class LfDServer(LfD):
             feedback.phase = "homing"
             goal_handle.publish_feedback(feedback)
             request = goal_handle.request
+            self.home_gripper()
             self.home(
                 height=request.height,
                 front_offset=request.front_offset,
@@ -842,6 +859,11 @@ class LfDServer(LfD):
         )
         while self.time_index < self.loaded_trajectory_len:
             self._raise_if_canceled(goal_handle)
+            if self.end:  # 'e' key
+                raise _OperationCanceled("ended by operator")
+            if self.pause:  # space toggles; the robot holds the last waypoint
+                time.sleep(0.05)
+                continue
             self.player_step()
             self._publish_feedback(
                 goal_handle,
@@ -1044,12 +1066,12 @@ class LfDServer(LfD):
         return f"Task {task.command!r} {outcome}{suffix}"
 
 
-def main():
+def main(server_class=LfDServer):
     rclpy.init()
     server = None
     failed = False
     try:
-        server = LfDServer()
+        server = server_class()
         server.start()
         server.get_logger().info(
             "LfD server ready: execute, record, home, and template reservation"

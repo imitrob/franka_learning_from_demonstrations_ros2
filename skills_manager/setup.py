@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             "home = skills_manager.home:main",
+            "ralfd_server = skills_manager.risk_aware_lfd.ralfd_server:main",
             "lfd_server = skills_manager.lfd_server:main",
             "record_skill = skills_manager.record_skill:main",
             "play_skill = skills_manager.play_skill:main",

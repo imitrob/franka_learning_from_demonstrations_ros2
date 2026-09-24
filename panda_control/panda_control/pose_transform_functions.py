@@ -123,7 +123,8 @@ def invert_tf(T):
 def q_norm(wxyz):
     q = np.array(wxyz, dtype=float)
     n = np.linalg.norm(q)
-    if n == 0: return np.array([1.0,0.0,0.0,0.0])
+    if q.shape != (4,) or not np.all(np.isfinite(q)) or n == 0:
+        raise ValueError("Quaternion must be finite and nonzero")
     q /= n
     if q[0] < 0: q = -q  # shortest-path hemisphere
     return q
@@ -150,22 +151,6 @@ def q_slerp(q0, q1, t):
 def build_quat_seq(q0, q1, N):
     ts = np.linspace(0.0, 1.0, N)
     return np.stack([q_slerp(q0, q1, t) for t in ts], axis=0)
-
-
-def min_angle_condition(q1, q2):
-    '''
-    q1 : xyzw
-    q2 : xyzw
-    '''
-    # xyzw -> wxyz (used in quaternion)
-    q1_ = quaternion.quaternion(*[q1[3], q1[0], q1[1], q1[2]])
-    q2_ = quaternion.quaternion(*[q1[3], q1[0], q1[1], q1[2]]) 
-
-    q_rel = q2_ * q1_.conjugate()
-    if q_rel.w < 0:
-        q_rel = -q_rel
-
-    return 2.0 * np.arccos(np.clip(q_rel.w, -1.0, 1.0))
 
 def step_slerp(q1, q2, epsilon):
     '''
