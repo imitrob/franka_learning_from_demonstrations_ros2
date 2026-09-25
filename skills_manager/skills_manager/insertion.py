@@ -18,7 +18,9 @@ class Insertion():
         time= 0
         spiral_success = False
         self.set_stiffness(self.K_pos, self.K_pos, self.K_pos/2, self.K_ori, self.K_ori, self.K_ori, 0) # get more compliant in z direction
-        for _ in range(max_spiral_time * control_rate):   
+        for _ in range(max_spiral_time * control_rate):
+            if self.end: # 'e' key; ponytail: action cancel is not seen here, only 'e'
+                break
             goal_pose.pose.position.x = pos_init[0] + np.cos(
                 2 * np.pi *rounds_per_second*time) * increase_radius_per_second * time
             goal_pose.pose.position.y = pos_init[1] + np.sin(
