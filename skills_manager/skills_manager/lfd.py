@@ -23,7 +23,7 @@ from skills_manager.ros_param_manager import get_remote_parameters
 from copy import deepcopy
 import spatialmath as sm
 import trajectory_data
-from trajectory_data.skill_visualizer import show_skill
+from trajectory_tools.skill_visualizer import show_skill
 from nocode_robot_programming.state_decision.utils import Filename
 
 class SkillVis():
@@ -262,7 +262,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                          img=self.recorded_img,
                          img_feedback_flag=self.recorded_img_feedback_flag,
                          spiral_flag=self.recorded_spiral_flag)
-            from trajectory_data.skill_part import SkillPart
+            from trajectory_tools.skill_part import SkillPart
             SkillPart(os.path.basename(temporary)).validate_archive(directory)
             os.replace(temporary, target)
         finally:

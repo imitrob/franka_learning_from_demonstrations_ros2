@@ -5,7 +5,7 @@ from lfd_msgs.action import ExecuteSkill
 from multi_modal_reasoning.skill_command import SkillCommand
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from trajectory_data.skill_part import SkillPart
+from trajectory_tools.skill_part import SkillPart
 
 
 def command_from_skill_name(name_skill: str, name_template: str = ""):

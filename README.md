@@ -62,6 +62,11 @@ with `plain_replay: true` skips branching for that one command.
 Pass `homing:="false"` to record from wherever the arm already is.
 
 All the trajectories are saved in the folder `trajectory_data/trajectories/` with the name you gave to the skill.
+
+`trajectory_data` holds data only. The code that reads it lives in `trajectory_tools`:
+- `SkillPart` (skill names and files) and `skill_visualizer` (dashboards, frame previews).
+- `ros2 run trajectory_tools make_videos [dir]`: mp4 of the recorded camera frames, next to each npz.
+- `ros2 run trajectory_tools render_skill <skill> -o <mp4 or folder>`: replays the skill on a simulated Panda in Swift, with `taskboard.stl` on the table (headless Chromium, GPU; `--cpu` for software GL). `check_mesh` tests that a mesh renders.
 This folder is a ros package that is used to save and load the demonstrations and save them. We used this folder to have a ligher repository and save all the demonstration in this other one. 
 
 During demonstration the robot is recording the Cartesian pose of the robot and the current image from the camera for each time step (the control freqeuncy is set to 20 Hz).

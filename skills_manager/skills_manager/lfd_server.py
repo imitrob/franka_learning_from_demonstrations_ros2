@@ -28,7 +28,7 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalRespons
 from rclpy.duration import Duration
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
-from trajectory_data.skill_part import SkillPart
+from trajectory_tools.skill_part import SkillPart
 
 from skills_manager.lfd import LfD
 
