@@ -57,7 +57,7 @@ class LocalizationService(CustomTransformListener, SpinningRosNode):
         # Minimum RANSAC inliers before a match is trusted enough to publish.
         # Deliberately separate from localizer_sift.MIN_MATCH_COUNT, which the
         # working servo path depends on and which must not change.
-        self.declare_parameter("min_inliers", 10)
+        self.declare_parameter("min_inliers", 7)
         # How far an image stamp may sit beyond the newest TF sample before the
         # frame is dropped. A broadcaster at N Hz leaves a 1/N second hole after
         # each sample, and the camera's pipeline latency is shorter than that hole

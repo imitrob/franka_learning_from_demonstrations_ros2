@@ -127,7 +127,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
 
             self.recorded_traj = self.curr_pos
             self.recorded_ori_wxyz = self.curr_ori_wxyz
-            self.recorded_gripper= self.grip_value
+            self.recorded_gripper= self.grip_record_value
             self.recorded_img_feedback_flag = np.array([0])
             self.recorded_spiral_flag = np.array([0])
             self.init_additional_flags()
@@ -148,7 +148,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                 t0 = time.perf_counter()
                 self.recorded_traj = np.c_[self.recorded_traj, self.curr_pos]
                 self.recorded_ori_wxyz  = np.c_[self.recorded_ori_wxyz, self.curr_ori_wxyz]
-                self.recorded_gripper = np.c_[self.recorded_gripper, self.grip_value]
+                self.recorded_gripper = np.c_[self.recorded_gripper, self.grip_record_value]
                 self.recorded_img = np.r_[self.recorded_img, self.pub_rec_image()]
 
                 self.recorded_img_feedback_flag = np.c_[self.recorded_img_feedback_flag, self.img_feedback_flag]
@@ -422,7 +422,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         # init recording of new execution attempt
         self.recorded_traj = self.curr_pos
         self.recorded_ori_wxyz = self.curr_ori_wxyz
-        self.recorded_gripper = self.grip_value
+        self.recorded_gripper = self.grip_record_value
         self.recorded_img_feedback_flag = np.array([0])
         self.recorded_spiral_flag = np.array([0])
         self.recorded_img = self.pub_rec_image()
@@ -484,7 +484,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         # save step sample
         self.recorded_traj = np.c_[self.recorded_traj, self.curr_pos]
         self.recorded_ori_wxyz  = np.c_[self.recorded_ori_wxyz, self.curr_ori_wxyz]
-        self.recorded_gripper = np.c_[self.recorded_gripper, self.grip_value]
+        self.recorded_gripper = np.c_[self.recorded_gripper, self.grip_record_value]
 
         self.recorded_img = np.r_[self.recorded_img, self.pub_rec_image()]
         self.recorded_img_feedback_flag = np.c_[self.recorded_img_feedback_flag, self.img_feedback_flag]

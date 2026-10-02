@@ -574,6 +574,11 @@ class Panda():
         return round(self.gripper_state.width, 2)
 
     @property
+    def grip_record_value(self):
+        # A held object reads as its own width; record it as closed so replay grasps again.
+        return 0.0 if self.gripper_state.is_grasped else self.grip_value
+
+    @property
     def force(self): # Get current force 
         robot_state = self.panda.get_state()
         external_wrench = np.array(robot_state.O_F_ext_hat_K)  # [Fx, Fy, Fz, Tx, Ty, Tz]

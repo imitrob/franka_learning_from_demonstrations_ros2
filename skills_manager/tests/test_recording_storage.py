@@ -25,3 +25,13 @@ def test_skill_save_is_validated_atomic_and_requires_explicit_overwrite(
     assert list((tmp_path / "trajectories").glob("*.npz")) == [
         tmp_path / "trajectories" / "pick__cube.npz"
     ]
+
+
+def test_grasped_object_records_as_closed():
+    from types import SimpleNamespace
+    lfd = object.__new__(LfD)
+    lfd.grip_open_width = 0.06
+    lfd.gripper_state = SimpleNamespace(is_grasped=True, width=0.045)  # 4.5 cm object
+    assert not lfd.IS_OPEN(lfd.grip_record_value)
+    lfd.gripper_state = SimpleNamespace(is_grasped=False, width=0.06)
+    assert lfd.IS_OPEN(lfd.grip_record_value)
