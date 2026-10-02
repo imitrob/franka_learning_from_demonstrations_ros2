@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from trajectory_data.skill_part import SkillPart
+from trajectory_tools.skill_part import SkillPart
 
 
 def _archive(path, length=3, **changes):

@@ -23,7 +23,7 @@ from skills_manager.ros_param_manager import get_remote_parameters
 from copy import deepcopy
 import spatialmath as sm
 import trajectory_data
-from trajectory_data.skill_visualizer import show_skill
+from trajectory_tools.skill_visualizer import show_skill
 from nocode_robot_programming.state_decision.utils import Filename
 
 class SkillVis():
@@ -262,7 +262,7 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
                          img=self.recorded_img,
                          img_feedback_flag=self.recorded_img_feedback_flag,
                          spiral_flag=self.recorded_spiral_flag)
-            from trajectory_data.skill_part import SkillPart
+            from trajectory_tools.skill_part import SkillPart
             SkillPart(os.path.basename(temporary)).validate_archive(directory)
             os.replace(temporary, target)
         finally:
@@ -423,8 +423,9 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.recorded_traj = self.curr_pos
         self.recorded_ori_wxyz = self.curr_ori_wxyz
         self.recorded_gripper = self.grip_record_value
-        self.recorded_img_feedback_flag = np.array([0])
-        self.recorded_spiral_flag = np.array([0])
+        # trial flags come from the demo (incl. live z/x, k/l corrections), not the keyboard state
+        self.recorded_img_feedback_flag = self.loaded_img_feedback_flag[:, :1].copy()
+        self.recorded_spiral_flag = self.loaded_spiral_flag[:, :1].copy()
         self.recorded_img = self.pub_rec_image()
 
         return start
@@ -444,16 +445,19 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.move_to_pose_with_stampedpose(goal)
 
         sift_step = bool(self.loaded_img_feedback_flag[0, self.time_index])
+        spiral_step = bool(self.loaded_spiral_flag[0, self.time_index])  # read before a failed spiral clears it
         if sift_step:
             self.sift_matching()
 
-        if self.loaded_spiral_flag[0, self.time_index]:
+        if spiral_step:
             if self.force.z > 5:
                 spiral_success, offset_correction = self.spiral_search(goal)
                 self.spiralling_occured = True
                 if spiral_success:
                     self.loaded_traj[0, self.time_index:] += offset_correction[0]
                     self.loaded_traj[1, self.time_index:] += offset_correction[1]
+                else: # one failed search is enough; don't wander in repeated spirals
+                    self.loaded_spiral_flag[0, self.time_index:] = 0
 
         goal_pos_array = position_2_array(goal.pose.position)
         pos_2_goal_diff = np.linalg.norm(self.curr_pos-goal_pos_array)
@@ -487,8 +491,8 @@ class LfD(Feedback, Panda, Insertion, Transform, CameraFeedback, SpinningRosNode
         self.recorded_gripper = np.c_[self.recorded_gripper, self.grip_record_value]
 
         self.recorded_img = np.r_[self.recorded_img, self.pub_rec_image()]
-        self.recorded_img_feedback_flag = np.c_[self.recorded_img_feedback_flag, self.img_feedback_flag]
-        self.recorded_spiral_flag = np.c_[self.recorded_spiral_flag, self.spiral_flag]
+        self.recorded_img_feedback_flag = np.c_[self.recorded_img_feedback_flag, int(sift_step)]
+        self.recorded_spiral_flag = np.c_[self.recorded_spiral_flag, int(spiral_step)]
 
     def start_publishing_scene(self):
         self.start_publishing_scene_call.call(Trigger.Request())

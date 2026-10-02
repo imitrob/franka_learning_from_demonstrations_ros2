@@ -4,10 +4,10 @@ Generate an mp4 video for each .npz trajectory file in a folder.
 Output videos are saved alongside the .npz files with the same stem name.
 
 Usage:
-    python3 make_videos.py [trajectories_dir] [--fps FPS] [--no-overlay] [--jobs N]
+    ros2 run trajectory_tools make_videos [trajectories_dir] [--fps FPS] [--no-overlay] [--jobs N]
 
 Defaults:
-    trajectories_dir  = ./trajectories
+    trajectories_dir  = <trajectory_data>/trajectories
     fps               = 30
     jobs              = number of CPU cores
 """
@@ -18,6 +18,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+import trajectory_data
 
 
 def overlay_hud(frame_bgr: np.ndarray, frame_idx: int, total: int,
@@ -101,7 +103,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("trajectories_dir", nargs="?",
-                        default=str(Path(__file__).parent / "trajectories"),
+                        default=f"{trajectory_data.package_path}/trajectories",
                         help="Folder containing .npz trajectory files")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--no-overlay", action="store_true",

@@ -28,7 +28,7 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalRespons
 from rclpy.duration import Duration
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
-from trajectory_data.skill_part import SkillPart
+from trajectory_tools.skill_part import SkillPart
 
 from skills_manager.lfd import LfD
 
@@ -198,7 +198,12 @@ class LfDServer(LfD):
             callback_group=self.callback_group,
         )
         self.create_timer(1.0, self._watch_controller, callback_group=self.callback_group)
+        self.create_timer(0.5, self._print_force, callback_group=self.callback_group)  # TEMP: spiral Fz check, delete later
         self._publish_operation_status()
+
+    def _print_force(self):  # TEMP: spiral Fz check, delete later
+        f = self.force
+        print(f"[force] x={f.x:+6.2f} y={f.y:+6.2f} z={f.z:+6.2f} N", flush=True)
 
     # --- shared admission/state -----------------------------------------
 

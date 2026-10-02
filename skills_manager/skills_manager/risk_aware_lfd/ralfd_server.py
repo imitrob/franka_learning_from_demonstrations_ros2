@@ -19,7 +19,7 @@ from lfd_msgs.srv import StringService
 from nocode_robot_programming.state_decision.utils import Filename
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String
-from trajectory_data.skill_part import SkillPart
+from trajectory_tools.skill_part import SkillPart
 
 from skills_manager import lfd_server
 from skills_manager.lfd_server import LfDServer
